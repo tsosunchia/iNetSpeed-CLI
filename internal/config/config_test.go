@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"testing"
 )
@@ -204,5 +205,69 @@ func TestLoadUpperLimitsAtBoundary(t *testing.T) {
 	}
 	if cfg.Timeout != 120 || cfg.Threads != 64 || cfg.LatencyCount != 100 {
 		t.Errorf("unexpected values: %+v", cfg)
+	}
+}
+
+func TestLoadFlagOverrides(t *testing.T) {
+	for _, k := range []string{"DL_URL", "UL_URL", "LATENCY_URL", "MAX", "TIMEOUT", "THREADS", "LATENCY_COUNT"} {
+		os.Unsetenv(k)
+	}
+	os.Setenv("TIMEOUT", "5")
+	defer os.Unsetenv("TIMEOUT")
+
+	cfg, err := Load(
+		"--dl-url", "https://example.com/dl2",
+		"--ul-url", "https://example.com/ul2",
+		"--latency-url", "https://example.com/la2",
+		"--max", "3G",
+		"--timeout", "12",
+		"--threads", "9",
+		"--latency-count", "15",
+	)
+	if err != nil {
+		t.Fatalf("Load() with flags should succeed: %v", err)
+	}
+
+	if cfg.DLURL != "https://example.com/dl2" {
+		t.Errorf("DLURL = %q", cfg.DLURL)
+	}
+	if cfg.ULURL != "https://example.com/ul2" {
+		t.Errorf("ULURL = %q", cfg.ULURL)
+	}
+	if cfg.LatencyURL != "https://example.com/la2" {
+		t.Errorf("LatencyURL = %q", cfg.LatencyURL)
+	}
+	if cfg.Max != "3G" || cfg.MaxBytes != 3_000_000_000 {
+		t.Errorf("Max/MaxBytes = %q/%d", cfg.Max, cfg.MaxBytes)
+	}
+	if cfg.Timeout != 12 {
+		t.Errorf("Timeout = %d", cfg.Timeout)
+	}
+	if cfg.Threads != 9 {
+		t.Errorf("Threads = %d", cfg.Threads)
+	}
+	if cfg.LatencyCount != 15 {
+		t.Errorf("LatencyCount = %d", cfg.LatencyCount)
+	}
+}
+
+func TestLoadHelpRequested(t *testing.T) {
+	tests := [][]string{
+		{"help"},
+		{"-h"},
+		{"--help"},
+	}
+	for _, args := range tests {
+		_, err := Load(args...)
+		if !errors.Is(err, ErrHelp) {
+			t.Fatalf("Load(%v) = %v, want ErrHelp", args, err)
+		}
+	}
+}
+
+func TestLoadUnexpectedArgs(t *testing.T) {
+	_, err := Load("extra")
+	if err == nil {
+		t.Fatal("Load() with unexpected args should fail")
 	}
 }

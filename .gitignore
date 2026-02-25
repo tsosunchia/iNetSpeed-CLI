@@ -118,6 +118,8 @@ go.work.sum
 # env file
 .env
 
+.cache/
+
 .idea/
 
 dist/

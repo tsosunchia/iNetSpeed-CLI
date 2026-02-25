@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -19,14 +20,20 @@ var (
 )
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "-v" || os.Args[1] == "--version") {
+	if len(os.Args) > 1 && (os.Args[1] == "-v" || os.Args[1] == "--version" || os.Args[1] == "version") {
 		fmt.Printf("speedtest %s (commit %s, built %s)\n", version, commit, date)
 		os.Exit(0)
 	}
 
-	cfg, err := config.Load()
+	cfg, err := config.Load(os.Args[1:]...)
 	if err != nil {
+		if errors.Is(err, config.ErrHelp) {
+			fmt.Print(config.Usage())
+			os.Exit(0)
+		}
 		fmt.Fprintf(os.Stderr, "  [\u2717] %s\n", err)
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprint(os.Stderr, config.Usage())
 		os.Exit(1)
 	}
 

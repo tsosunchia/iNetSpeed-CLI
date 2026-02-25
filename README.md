@@ -25,6 +25,9 @@ go build -o speedtest ./cmd/speedtest/
 # 查看版本
 ./speedtest --version
 
+# 查看帮助
+./speedtest --help
+
 # 多平台交叉编译（输出到 dist/）
 bash scripts/build.sh
 ```
@@ -64,6 +67,24 @@ bash scripts/check.sh
 
 ```bash
 TIMEOUT=5 MAX=1G THREADS=8 LATENCY_COUNT=10 go run ./cmd/speedtest/
+```
+
+### 命令行参数（优先级高于环境变量）
+
+| 参数 | 对应环境变量 | 说明 |
+|------|--------------|------|
+| `--dl-url` | `DL_URL` | 下载测试地址 |
+| `--ul-url` | `UL_URL` | 上传测试地址 |
+| `--latency-url` | `LATENCY_URL` | 延迟测试地址 |
+| `--max` | `MAX` | 每线程最大传输量 |
+| `--timeout` | `TIMEOUT` | 每线程传输超时（秒） |
+| `--threads` | `THREADS` | 多线程并发数 |
+| `--latency-count` | `LATENCY_COUNT` | 空载延迟采样次数 |
+
+示例：
+
+```bash
+./speedtest --timeout 5 --max 1G --threads 8 --latency-count 10
 ```
 
 ### 输出模式

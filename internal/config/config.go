@@ -1,7 +1,10 @@
 package config
 
 import (
+	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
@@ -19,6 +22,8 @@ const (
 	UserAgent           = "networkQuality/194.80.3 CFNetwork/3860.400.51 Darwin/25.3.0"
 )
 
+var ErrHelp = errors.New("help requested")
+
 type Config struct {
 	DLURL        string
 	ULURL        string
@@ -30,16 +35,76 @@ type Config struct {
 	LatencyCount int
 }
 
-func Load() (*Config, error) {
-	c := &Config{
-		DLURL:        envOr("DL_URL", DefaultDLURL),
-		ULURL:        envOr("UL_URL", DefaultULURL),
-		LatencyURL:   envOr("LATENCY_URL", DefaultLatencyURL),
-		Max:          envOr("MAX", DefaultMax),
-		Timeout:      envInt("TIMEOUT", DefaultTimeout),
-		Threads:      envInt("THREADS", DefaultThreads),
-		LatencyCount: envInt("LATENCY_COUNT", DefaultLatencyCount),
+func Usage() string {
+	return fmt.Sprintf(`Usage:
+  speedtest [options]
+  speedtest help
+
+Options:
+  -h, --help                    Show this help message
+  -v, --version                 Show version
+  --dl-url URL                  Download test URL (default from DL_URL or %q)
+  --ul-url URL                  Upload test URL (default from UL_URL or %q)
+  --latency-url URL             Latency test URL (default from LATENCY_URL or %q)
+  --max SIZE                    Per-thread transfer cap, e.g. 2G/500M/1GiB (default from MAX or %q)
+  --timeout SECONDS             Per-thread timeout in seconds, 1-120 (default from TIMEOUT or %d)
+  --threads N                   Concurrent threads, 1-64 (default from THREADS or %d)
+  --latency-count N             Latency sample count, 1-100 (default from LATENCY_COUNT or %d)
+
+Environment variables:
+  DL_URL, UL_URL, LATENCY_URL, MAX, TIMEOUT, THREADS, LATENCY_COUNT
+`, DefaultDLURL, DefaultULURL, DefaultLatencyURL, DefaultMax, DefaultTimeout, DefaultThreads, DefaultLatencyCount)
+}
+
+func Load(args ...string) (*Config, error) {
+	if len(args) == 1 && args[0] == "help" {
+		return nil, ErrHelp
 	}
+
+	dlURL := envOr("DL_URL", DefaultDLURL)
+	ulURL := envOr("UL_URL", DefaultULURL)
+	latencyURL := envOr("LATENCY_URL", DefaultLatencyURL)
+	maxValue := envOr("MAX", DefaultMax)
+	timeout := envInt("TIMEOUT", DefaultTimeout)
+	threads := envInt("THREADS", DefaultThreads)
+	latencyCount := envInt("LATENCY_COUNT", DefaultLatencyCount)
+
+	if len(args) > 0 {
+		fs := flag.NewFlagSet("speedtest", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+
+		help := false
+		fs.BoolVar(&help, "h", false, "show help")
+		fs.BoolVar(&help, "help", false, "show help")
+		fs.StringVar(&dlURL, "dl-url", dlURL, "download test URL")
+		fs.StringVar(&ulURL, "ul-url", ulURL, "upload test URL")
+		fs.StringVar(&latencyURL, "latency-url", latencyURL, "latency test URL")
+		fs.StringVar(&maxValue, "max", maxValue, "per-thread transfer cap")
+		fs.IntVar(&timeout, "timeout", timeout, "per-thread timeout in seconds")
+		fs.IntVar(&threads, "threads", threads, "concurrent threads")
+		fs.IntVar(&latencyCount, "latency-count", latencyCount, "latency sample count")
+
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if help {
+			return nil, ErrHelp
+		}
+		if fs.NArg() > 0 {
+			return nil, fmt.Errorf("unexpected argument(s): %s", strings.Join(fs.Args(), " "))
+		}
+	}
+
+	c := &Config{
+		DLURL:        dlURL,
+		ULURL:        ulURL,
+		LatencyURL:   latencyURL,
+		Max:          maxValue,
+		Timeout:      timeout,
+		Threads:      threads,
+		LatencyCount: latencyCount,
+	}
+
 	var err error
 	c.MaxBytes, err = ParseSize(c.Max)
 	if err != nil {
