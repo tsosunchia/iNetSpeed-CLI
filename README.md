@@ -1,4 +1,4 @@
-# Apple CDN Network Bench
+# iNetSpeed-CLI
 
 > Apple CDN (`mensura.cdn-apple.com`) 的下载/上传/延迟测速工具。  
 > 支持单线程、多线程、延迟采样与节点选择，适合中国网络环境实测。
