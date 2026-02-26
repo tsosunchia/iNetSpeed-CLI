@@ -33,7 +33,7 @@ go run ./cmd/speedtest/
 仓库内脚本直接运行：
 
 ```bash
-sh apple-cdn-speedtest.sh
+sh scripts/apple-cdn-speedtest.sh
 ```
 
 或在线脚本一键测试：
@@ -46,9 +46,9 @@ curl -sL nxtrace.org/speedtest | bash
 
 | 你要做什么 | 用哪个资源 |
 |------|------|
-| 完整测速（下载 + 上传 + 延迟） | `cmd/speedtest/main.go`（Go） / `apple-cdn-speedtest.sh`（Shell） |
-| 只测下载 | `apple-cdn-download-test.sh` |
-| 只测上传 | `apple-cdn-upload-test.sh` |
+| 完整测速（下载 + 上传 + 延迟） | `cmd/speedtest/main.go`（Go） / `scripts/apple-cdn-speedtest.sh`（Shell） |
+| 只测下载 | `scripts/apple-cdn-download-test.sh` |
+| 只测上传 | `scripts/apple-cdn-upload-test.sh` |
 | 构建多平台二进制 | `scripts/build.sh`（输出到 `dist/`） |
 | 一键安装 Go 版（Linux） | `scripts/install.sh` |
 | 本地质量检查（格式 + vet + test + race） | `scripts/check.sh` |
@@ -62,14 +62,14 @@ curl -sL nxtrace.org/speedtest | bash
 go run ./cmd/speedtest/
 
 # Shell 版本
-sh apple-cdn-speedtest.sh
+sh scripts/apple-cdn-speedtest.sh
 ```
 
 ### 2) 只测下载 / 只测上传（Shell）
 
 ```bash
-sh apple-cdn-download-test.sh
-sh apple-cdn-upload-test.sh
+sh scripts/apple-cdn-download-test.sh
+sh scripts/apple-cdn-upload-test.sh
 ```
 
 ### 3) 自定义参数测速
@@ -206,9 +206,9 @@ bash scripts/check.sh         # 本地完整检查（格式 + vet + test + race�
 
 ### 包含脚本
 
-- `apple-cdn-speedtest.sh`：完整测速（空载延迟、单/多线程下载、单/多线程上传）
-- `apple-cdn-download-test.sh`：仅下载测速
-- `apple-cdn-upload-test.sh`：仅上传测速
+- `scripts/apple-cdn-speedtest.sh`：完整测速（空载延迟、单/多线程下载、单/多线程上传）
+- `scripts/apple-cdn-download-test.sh`：仅下载测速
+- `scripts/apple-cdn-upload-test.sh`：仅上传测速
 
 ### 环境依赖
 
@@ -268,7 +268,7 @@ chmod +x speedtest
 
 ### 常用环境变量（Shell 版）
 
-主脚本（`apple-cdn-speedtest.sh`）：
+主脚本（`scripts/apple-cdn-speedtest.sh`）：
 
 - `DL_URL`：下载 URL
 - `UL_URL`：上传 URL
@@ -281,7 +281,7 @@ chmod +x speedtest
 示例：
 
 ```bash
-TIMEOUT=5 MAX=1G THREADS=8 LATENCY_COUNT=10 sh apple-cdn-speedtest.sh
+TIMEOUT=5 MAX=1G THREADS=8 LATENCY_COUNT=10 sh scripts/apple-cdn-speedtest.sh
 ```
 
 ### 节点选择逻辑（Shell 版）
