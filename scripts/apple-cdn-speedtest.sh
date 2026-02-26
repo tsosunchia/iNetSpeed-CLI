@@ -75,8 +75,10 @@ msg() {
     "Endpoint Selection") printf "节点选择" ;;
     "Could not parse host from DL_URL. Skip endpoint selection.") printf "无法从 DL_URL 解析主机，跳过节点选择。" ;;
     "Host: "*) printf "主机: %s" "${_m#Host: }" ;;
-    "DoH: "*) printf "DoH: %s" "${_m#DoH: }" ;;
-    "AliDNS DoH returned no IPv4 endpoint. Fallback to system DNS.") printf "AliDNS DoH 未返回 IPv4 节点，回退到系统 DNS。" ;;
+    "DoH (CF): "*) printf "DoH (CF): %s" "${_m#DoH (CF): }" ;;
+    "DoH (Ali): "*) printf "DoH (Ali): %s" "${_m#DoH (Ali): }" ;;
+    "Dual DoH (CF + Ali) both timed out. Fallback to system DNS.") printf "双 DoH（CF + Ali）均超时，回退到系统 DNS。" ;;
+    "Dual DoH returned no IPv4 endpoint, continue with default DNS.") printf "双 DoH 未返回 IPv4 节点，继续使用默认 DNS。" ;;
     "Selected endpoint: "*) printf "已选择节点: %s" "${_m#Selected endpoint: }" ;;
     "Could not resolve endpoint IP, continue with default DNS.") printf "无法解析节点 IP，继续使用默认 DNS。" ;;
     "Available endpoints:") printf "可用节点:" ;;
@@ -256,7 +258,7 @@ apple_curl() {
 }
 
 # ────────────────────────────────────────────────────────────
-#  ENDPOINT SELECTION  (AliDNS DoH + ip-api)
+#  ENDPOINT SELECTION  (CF DoH + AliDNS DoH concurrent)
 # ────────────────────────────────────────────────────────────
 choose_endpoint() {
   hdr "Endpoint Selection"
@@ -268,21 +270,83 @@ choose_endpoint() {
   fi
 
   info "Host: $CDN_HOST"
-  info "DoH: https://dns.alidns.com/resolve?name=${CDN_HOST}&type=A"
+  info "DoH (CF): https://cloudflare-dns.com/dns-query?name=${CDN_HOST}&type=A"
+  info "DoH (Ali): https://dns.alidns.com/resolve?name=${CDN_HOST}&type=A"
 
-  _ips="$(curl -sS --max-time 5 \
-    "https://dns.alidns.com/resolve?name=${CDN_HOST}&type=A&short=1" 2>/dev/null \
-    | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' \
-    | awk '!seen[$0]++')"
+  # Temp files for concurrent results
+  _cf_file="$(mktemp)"
+  _ali_file="$(mktemp)"
+  _cf_rc_file="$(mktemp)"
+  _ali_rc_file="$(mktemp)"
+
+  # Concurrent CF DoH query (background)
+  (
+    curl -sS --max-time 1 \
+      -H 'accept: application/dns-json' \
+      "https://cloudflare-dns.com/dns-query?name=${CDN_HOST}&type=A" \
+      > "$_cf_file" 2>/dev/null
+    echo "$?" > "$_cf_rc_file"
+  ) &
+  _cf_pid=$!
+
+  # Concurrent Ali DoH query (background)
+  (
+    curl -sS --max-time 1 \
+      "https://dns.alidns.com/resolve?name=${CDN_HOST}&type=A&short=1" \
+      > "$_ali_file" 2>/dev/null
+    echo "$?" > "$_ali_rc_file"
+  ) &
+  _ali_pid=$!
+
+  # Wait for both
+  wait "$_cf_pid" 2>/dev/null || true
+  wait "$_ali_pid" 2>/dev/null || true
+
+  _cf_rc="$(cat "$_cf_rc_file" 2>/dev/null)"; [ -z "$_cf_rc" ] && _cf_rc=1
+  _ali_rc="$(cat "$_ali_rc_file" 2>/dev/null)"; [ -z "$_ali_rc" ] && _ali_rc=1
+
+  # Determine timeout status (curl exit code 28 = timeout)
+  _cf_timeout=0; [ "$_cf_rc" -eq 28 ] && _cf_timeout=1
+  _ali_timeout=0; [ "$_ali_rc" -eq 28 ] && _ali_timeout=1
+
+  # Extract IPs from CF result
+  _cf_ips=""
+  if [ "$_cf_timeout" -eq 0 ] && [ -s "$_cf_file" ]; then
+    _cf_ips="$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$_cf_file" | awk '!seen[$0]++')"
+  fi
+
+  # Extract IPs from Ali result
+  _ali_ips=""
+  if [ "$_ali_timeout" -eq 0 ] && [ -s "$_ali_file" ]; then
+    _ali_ips="$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$_ali_file" | awk '!seen[$0]++')"
+  fi
+
+  rm -f "$_cf_file" "$_ali_file" "$_cf_rc_file" "$_ali_rc_file"
+
+  # Merge: CF first, Ali second, deduplicated
+  _ips=""
+  if [ -n "$_cf_ips" ] && [ -n "$_ali_ips" ]; then
+    _ips="$(printf "%s\n%s\n" "$_cf_ips" "$_ali_ips" | awk '!seen[$0]++')"
+  elif [ -n "$_cf_ips" ]; then
+    _ips="$_cf_ips"
+  elif [ -n "$_ali_ips" ]; then
+    _ips="$_ali_ips"
+  fi
 
   if [ -z "$_ips" ]; then
-    warn "AliDNS DoH returned no IPv4 endpoint. Fallback to system DNS."
-    _fallback_ip="$(resolve_ip "$CDN_HOST")"
-    if [ -n "$_fallback_ip" ]; then
-      SELECTED_ENDPOINT_IP="$_fallback_ip"
-      SELECTED_ENDPOINT_DESC="system DNS fallback"
-      info "Selected endpoint: ${SELECTED_ENDPOINT_IP} (${SELECTED_ENDPOINT_DESC})"
+    # Fallback only when BOTH timed out
+    if [ "$_cf_timeout" -eq 1 ] && [ "$_ali_timeout" -eq 1 ]; then
+      warn "Dual DoH (CF + Ali) both timed out. Fallback to system DNS."
+      _fallback_ip="$(resolve_ip "$CDN_HOST")"
+      if [ -n "$_fallback_ip" ]; then
+        SELECTED_ENDPOINT_IP="$_fallback_ip"
+        SELECTED_ENDPOINT_DESC="system DNS fallback"
+        info "Selected endpoint: ${SELECTED_ENDPOINT_IP} (${SELECTED_ENDPOINT_DESC})"
+      else
+        warn "Could not resolve endpoint IP, continue with default DNS."
+      fi
     else
+      warn "Dual DoH returned no IPv4 endpoint, continue with default DNS."
       warn "Could not resolve endpoint IP, continue with default DNS."
     fi
     return

@@ -174,10 +174,12 @@ curl -sL nxtrace.org/speedtest_install | bash
 
 ### 节点选择逻辑
 
-1. 通过 AliDNS DoH 查询 `mensura.cdn-apple.com` 的 A 记录。
-2. 用 ip-api 查询每个 IP 的地域 / ASN 信息。
-3. 交互终端下可手动选择节点；非交互环境默认选择第 1 个。
-4. 选中后通过 HTTP 客户端 DialContext 固定连接目标（等效于 `curl --resolve`）。
+1. 并发查询 Cloudflare DoH 和 AliDNS DoH 获取 `mensura.cdn-apple.com` 的 A 记录（各 1 秒超时）。
+2. 合并结果：CF 在前，Ali 在后，去重后作为候选节点列表。
+3. 仅当两路 DoH **都超时** 时，才触发 system DNS fallback。
+4. 用 ip-api 查询每个 IP 的地域 / ASN 信息。
+5. 交互终端下可手动选择节点；非交互环境默认选择第 1 个。
+6. 选中后通过 HTTP 客户端 DialContext 固定连接目标（等效于 `curl --resolve`）。
 
 ### 项目结构
 
@@ -186,7 +188,7 @@ cmd/speedtest/main.go       入口，信号处理
 internal/
   config/    配置加载 & 校验 & 单位解析
   netx/      HTTP/2 客户端工厂 + 端点固定（--resolve 等效）
-  endpoint/  DoH 解析 + ip-api 地理信息 + 节点选择
+  endpoint/  双 DoH（CF+Ali）解析 + ip-api 地理信息 + 节点选择
   latency/   空载/负载延迟采样 & 统计
   transfer/  下载/上传传输（单/多线程、双限制）
   runner/    测试流程编排
@@ -246,6 +248,7 @@ bash scripts/check.sh         # 本地完整检查（格式 + vet + test + race�
 网络访问要求：
 
 - Apple 测速端点：`https://mensura.cdn-apple.com`
+- Cloudflare DoH：`https://cloudflare-dns.com`（节点选择）
 - AliDNS DoH：`https://dns.alidns.com`（节点选择）
 - ip-api：`http://ip-api.com`（节点地理信息）
 
@@ -292,10 +295,12 @@ TIMEOUT=5 MAX=1G THREADS=8 LATENCY_COUNT=10 sh scripts/apple-cdn-speedtest.sh
 
 ### 节点选择逻辑（Shell 版）
 
-1. 通过 AliDNS DoH 查询 `mensura.cdn-apple.com` 的 A 记录。
-2. 用 ip-api 查询每个 IP 的地域/ASN 信息。
-3. 交互终端下可手动选择节点；非交互环境默认选择第 1 个。
-4. 选中后通过 `curl --resolve host:443:IP` 固定后续测试连接目标。
+1. 并发查询 Cloudflare DoH 和 AliDNS DoH 获取 `mensura.cdn-apple.com` 的 A 记录（各 1 秒超时）。
+2. 合并结果：CF 在前，Ali 在后，去重后作为候选节点列表。
+3. 仅当两路 DoH **都超时** 时，才触发 system DNS fallback。
+4. 用 ip-api 查询每个 IP 的地域/ASN 信息。
+5. 交互终端下可手动选择节点；非交互环境默认选择第 1 个。
+6. 选中后通过 `curl --resolve host:443:IP` 固定后续测试连接目标。
 
 ## 许可证
 

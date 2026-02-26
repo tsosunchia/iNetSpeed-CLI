@@ -7,8 +7,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
 )
@@ -57,8 +59,6 @@ func TestFetchInfoMockSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// We cannot easily override the URL in FetchInfo, so test the JSON parsing path
-	// by calling the server directly
 	resp, err := http.Get(srv.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -76,34 +76,12 @@ func TestFetchInfoMockSuccess(t *testing.T) {
 	}
 }
 
-func TestResolveDoHMock(t *testing.T) {
-	// Test with the structured AliDNS response format
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"Answer":[{"data":"1.2.3.4"},{"data":"5.6.7.8"}]}`)
-	}))
-	defer srv.Close()
-
-	// Can't directly test resolveDoH without refactoring, but test the JSON parsing
-	var dr dohResponse
-	resp, err := http.Get(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	json.NewDecoder(resp.Body).Decode(&dr)
-	if len(dr.Answer) != 2 {
-		t.Errorf("expected 2 answers, got %d", len(dr.Answer))
-	}
-}
-
 func TestResolveDoHFallbackRegex(t *testing.T) {
-	// Test with raw text containing IPs (like the short=1 format)
 	body := "1.2.3.4\n5.6.7.8\n1.2.3.4\n"
 	ips := ipv4Re.FindAllString(body, -1)
 	if len(ips) != 3 {
 		t.Errorf("expected 3 matches, got %d", len(ips))
 	}
-	// Deduplicate
 	seen := map[string]bool{}
 	var unique []string
 	for _, ip := range ips {
@@ -114,23 +92,6 @@ func TestResolveDoHFallbackRegex(t *testing.T) {
 	}
 	if len(unique) != 2 {
 		t.Errorf("expected 2 unique, got %d", len(unique))
-	}
-}
-
-func TestDoResolveDoHStatusCode(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-
-	// doResolveDoH checks HTTP status; a non-200 should return error
-	resp, err := http.Get(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
-		t.Error("expected non-200 status")
 	}
 }
 
@@ -155,7 +116,6 @@ func TestDoFetchInfoRetryTransportError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts++
 		if attempts < 3 {
-			// Force a broken response to simulate transport error
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -171,7 +131,6 @@ func TestDoFetchInfoRetryTransportError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Simulate calling the server multiple times (retry behavior)
 	var info IPInfo
 	var lastErr error
 	for i := 0; i < 3; i++ {
@@ -201,30 +160,67 @@ func TestDoFetchInfoRetryTransportError(t *testing.T) {
 }
 
 func TestChooseSystemDNSFallback(t *testing.T) {
-	// Choose with a host that DoH cannot resolve should fall back to system DNS
-	// We can't easily test the full flow without network,
-	// so test with empty host which should return empty endpoint
+	oldResolveDoH := resolveDoHFn
+	oldResolveSystem := resolveSystemFn
+	t.Cleanup(func() {
+		resolveDoHFn = oldResolveDoH
+		resolveSystemFn = oldResolveSystem
+	})
+
+	resolveDoHFn = func(ctx context.Context, host string) ([]string, bool, bool) {
+		return nil, true, true
+	}
+	resolveSystemFn = func(host string) string {
+		return "9.9.9.9"
+	}
+
 	bus := newTestBus()
 	defer bus.Close()
-	ep := Choose(context.Background(), "", bus, false)
+	ep := Choose(context.Background(), "mensura.cdn-apple.com", bus, false)
+	if ep.IP != "9.9.9.9" {
+		t.Errorf("expected system fallback IP, got %+v", ep)
+	}
+	if ep.Desc != "system DNS fallback" {
+		t.Errorf("expected fallback desc, got %q", ep.Desc)
+	}
+}
+
+func TestChooseNoFallbackWhenDualDoHNoIPs(t *testing.T) {
+	oldResolveDoH := resolveDoHFn
+	oldResolveSystem := resolveSystemFn
+	t.Cleanup(func() {
+		resolveDoHFn = oldResolveDoH
+		resolveSystemFn = oldResolveSystem
+	})
+
+	resolveDoHFn = func(ctx context.Context, host string) ([]string, bool, bool) {
+		return nil, false, false
+	}
+	resolveSystemCalled := false
+	resolveSystemFn = func(host string) string {
+		resolveSystemCalled = true
+		return "8.8.8.8"
+	}
+
+	bus := newTestBus()
+	defer bus.Close()
+	ep := Choose(context.Background(), "mensura.cdn-apple.com", bus, false)
 	if ep.IP != "" {
-		t.Errorf("expected empty endpoint for empty host, got %+v", ep)
+		t.Errorf("expected empty endpoint when dual DoH has no IPs but no timeout, got %+v", ep)
+	}
+	if resolveSystemCalled {
+		t.Error("expected system DNS not to be called")
 	}
 }
 
 func TestResolveHostLocalhost(t *testing.T) {
-	// ResolveHost should be able to resolve "localhost" via system DNS
 	ip := ResolveHost("localhost")
-	// On most systems this returns 127.0.0.1; on some it may return "".
-	// Just verify it doesn't panic and returns either "" or a valid IP.
 	if ip != "" && net.ParseIP(ip) == nil {
 		t.Errorf("ResolveHost returned invalid IP: %q", ip)
 	}
 }
 
 func TestDoFetchInfoJSONStatusFail(t *testing.T) {
-	// ip-api can return HTTP 200 with status:"fail" in JSON.
-	// doFetchInfo should treat this as an error and trigger retry.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{
 			"status":  "fail",
@@ -246,7 +242,6 @@ func TestDoFetchInfoJSONStatusFail(t *testing.T) {
 	if info.Status == "success" {
 		t.Error("expected non-success status")
 	}
-	// Verify our doFetchInfo logic: status != success should be treated as error
 	if info.Status != "fail" {
 		t.Errorf("expected status=fail, got %q", info.Status)
 	}
@@ -276,5 +271,242 @@ func TestParseChoice(t *testing.T) {
 				t.Fatalf("parseChoice(%q, %d) = (%d, %v), want (%d, %v)", tt.line, tt.count, got, ok, tt.want, tt.ok)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  Dual DoH unit tests
+// ---------------------------------------------------------------------------
+
+func TestExtractIPsFromBody_JSON(t *testing.T) {
+	body := []byte(`{"Answer":[{"data":"1.2.3.4"},{"data":"5.6.7.8"},{"data":"1.2.3.4"}]}`)
+	ips := extractIPsFromBody(body)
+	if len(ips) != 2 {
+		t.Fatalf("expected 2 unique IPs, got %d: %v", len(ips), ips)
+	}
+	if ips[0] != "1.2.3.4" || ips[1] != "5.6.7.8" {
+		t.Errorf("unexpected IPs: %v", ips)
+	}
+}
+
+func TestExtractIPsFromBody_Regex(t *testing.T) {
+	body := []byte("10.0.0.1\n10.0.0.2\n")
+	ips := extractIPsFromBody(body)
+	if len(ips) != 2 || ips[0] != "10.0.0.1" || ips[1] != "10.0.0.2" {
+		t.Errorf("unexpected IPs: %v", ips)
+	}
+}
+
+func TestExtractIPsFromBody_Empty(t *testing.T) {
+	body := []byte(`{"Answer":[]}`)
+	ips := extractIPsFromBody(body)
+	if len(ips) != 0 {
+		t.Errorf("expected 0 IPs, got %v", ips)
+	}
+}
+
+func TestMergeIPs(t *testing.T) {
+	cf := []string{"1.1.1.1", "2.2.2.2"}
+	ali := []string{"2.2.2.2", "3.3.3.3"}
+	merged := mergeIPs(cf, ali)
+	want := []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"}
+	if len(merged) != len(want) {
+		t.Fatalf("mergeIPs length = %d, want %d", len(merged), len(want))
+	}
+	for i := range want {
+		if merged[i] != want[i] {
+			t.Errorf("mergeIPs[%d] = %q, want %q", i, merged[i], want[i])
+		}
+	}
+}
+
+func TestMergeIPs_CFFirst(t *testing.T) {
+	cf := []string{"10.0.0.1"}
+	ali := []string{"10.0.0.2"}
+	merged := mergeIPs(cf, ali)
+	if len(merged) != 2 || merged[0] != "10.0.0.1" || merged[1] != "10.0.0.2" {
+		t.Errorf("expected CF first, got %v", merged)
+	}
+}
+
+func useDoHTestConfig(t *testing.T, client *http.Client, timeout time.Duration, cfTemplate, aliTemplate string) {
+	oldCFTemplate := cfDoHURLTemplate
+	oldAliTemplate := aliDoHURLTemplate
+	oldHTTPClient := dohHTTPClient
+	oldTimeout := dohTimeout
+	t.Cleanup(func() {
+		cfDoHURLTemplate = oldCFTemplate
+		aliDoHURLTemplate = oldAliTemplate
+		dohHTTPClient = oldHTTPClient
+		dohTimeout = oldTimeout
+	})
+
+	cfDoHURLTemplate = cfTemplate
+	aliDoHURLTemplate = aliTemplate
+	dohHTTPClient = client
+	dohTimeout = timeout
+}
+
+func TestResolveDoHDual_BothSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/cf":
+			if got := r.Header.Get("Accept"); got != "application/dns-json" {
+				t.Errorf("CF request missing Accept header, got %q", got)
+			}
+			fmt.Fprint(w, `{"Answer":[{"data":"1.1.1.1"},{"data":"2.2.2.2"}]}`)
+		case "/ali":
+			fmt.Fprint(w, `{"Answer":[{"data":"2.2.2.2"},{"data":"3.3.3.3"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	useDoHTestConfig(
+		t,
+		srv.Client(),
+		time.Second,
+		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/ali?name=%s&type=A&short=1",
+	)
+
+	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
+	want := []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"}
+	if !reflect.DeepEqual(ips, want) {
+		t.Fatalf("resolveDoHDual IPs = %v, want %v", ips, want)
+	}
+	if cfTimedOut || aliTimedOut {
+		t.Fatalf("unexpected timeout flags: cf=%v ali=%v", cfTimedOut, aliTimedOut)
+	}
+}
+
+func TestResolveDoHDual_CFTimeoutAliSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/cf":
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			fmt.Fprint(w, `{"Answer":[{"data":"1.1.1.1"}]}`)
+		case "/ali":
+			fmt.Fprint(w, `{"Answer":[{"data":"3.3.3.3"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	useDoHTestConfig(
+		t,
+		srv.Client(),
+		50*time.Millisecond,
+		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/ali?name=%s&type=A&short=1",
+	)
+
+	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
+	want := []string{"3.3.3.3"}
+	if !reflect.DeepEqual(ips, want) {
+		t.Fatalf("resolveDoHDual IPs = %v, want %v", ips, want)
+	}
+	if !cfTimedOut || aliTimedOut {
+		t.Fatalf("unexpected timeout flags: cf=%v ali=%v", cfTimedOut, aliTimedOut)
+	}
+}
+
+func TestResolveDoHDual_AliTimeoutCFSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/cf":
+			fmt.Fprint(w, `{"Answer":[{"data":"1.1.1.1"}]}`)
+		case "/ali":
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			fmt.Fprint(w, `{"Answer":[{"data":"3.3.3.3"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	useDoHTestConfig(
+		t,
+		srv.Client(),
+		50*time.Millisecond,
+		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/ali?name=%s&type=A&short=1",
+	)
+
+	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
+	want := []string{"1.1.1.1"}
+	if !reflect.DeepEqual(ips, want) {
+		t.Fatalf("resolveDoHDual IPs = %v, want %v", ips, want)
+	}
+	if cfTimedOut || !aliTimedOut {
+		t.Fatalf("unexpected timeout flags: cf=%v ali=%v", cfTimedOut, aliTimedOut)
+	}
+}
+
+func TestResolveDoHDual_BothTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+		fmt.Fprint(w, `{"Answer":[{"data":"1.1.1.1"}]}`)
+	}))
+	defer srv.Close()
+	useDoHTestConfig(
+		t,
+		srv.Client(),
+		50*time.Millisecond,
+		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/ali?name=%s&type=A&short=1",
+	)
+
+	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
+	if len(ips) != 0 {
+		t.Fatalf("expected no IPs when both providers timeout, got %v", ips)
+	}
+	if !cfTimedOut || !aliTimedOut {
+		t.Fatalf("expected both providers timeout, cf=%v ali=%v", cfTimedOut, aliTimedOut)
+	}
+}
+
+func TestResolveDoHDual_BothNoIPsWithoutTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"Answer":[]}`)
+	}))
+	defer srv.Close()
+	useDoHTestConfig(
+		t,
+		srv.Client(),
+		time.Second,
+		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/ali?name=%s&type=A&short=1",
+	)
+
+	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
+	if len(ips) != 0 {
+		t.Fatalf("expected no IPs, got %v", ips)
+	}
+	if cfTimedOut || aliTimedOut {
+		t.Fatalf("did not expect timeout flags, cf=%v ali=%v", cfTimedOut, aliTimedOut)
+	}
+}
+
+func TestIsTimeoutErr(t *testing.T) {
+	if isTimeoutErr(nil) {
+		t.Error("nil should not be timeout")
+	}
+	if !isTimeoutErr(context.DeadlineExceeded) {
+		t.Error("DeadlineExceeded should be timeout")
+	}
+	if isTimeoutErr(fmt.Errorf("random error")) {
+		t.Error("random error should not be timeout")
 	}
 }

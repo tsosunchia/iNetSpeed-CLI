@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/i18n"
@@ -20,6 +21,19 @@ import (
 )
 
 var ipv4Re = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+
+var (
+	cfDoHURLTemplate  = "https://cloudflare-dns.com/dns-query?name=%s&type=A"
+	aliDoHURLTemplate = "https://dns.alidns.com/resolve?name=%s&type=A&short=1"
+
+	// dohTimeout is the per-provider timeout for DoH queries.
+	dohTimeout = 1 * time.Second
+
+	dohHTTPClient   = http.DefaultClient
+	resolveDoHFn    = resolveDoHDual
+	resolveSystemFn = resolveSystem
+	fetchIPDescFn   = fetchIPDesc
+)
 
 type Endpoint struct {
 	IP   string
@@ -37,6 +51,13 @@ type IPInfo struct {
 	Country    string `json:"country"`
 }
 
+// dohResult holds the outcome of a single DoH provider query.
+type dohResult struct {
+	ips      []string
+	timedOut bool
+	err      error
+}
+
 func Choose(ctx context.Context, host string, bus *render.Bus, isTTY bool) Endpoint {
 	bus.Header(i18n.Text("Endpoint Selection", "节点选择"))
 	if host == "" {
@@ -45,22 +66,27 @@ func Choose(ctx context.Context, host string, bus *render.Bus, isTTY bool) Endpo
 	}
 	bus.Info(i18n.Text("Host: ", "主机: ") + host)
 
-	ips := resolveDoH(ctx, host)
+	ips, cfTimedOut, aliTimedOut := resolveDoHFn(ctx, host)
 	if len(ips) == 0 {
-		bus.Warn(i18n.Text("AliDNS DoH returned no IPv4 endpoint. Fallback to system DNS.", "AliDNS DoH 未返回 IPv4 节点，回退系统 DNS。"))
-		fb := resolveSystem(host)
-		if fb != "" {
-			ep := Endpoint{IP: fb, Desc: i18n.Text("system DNS fallback", "系统 DNS 回退")}
-			bus.Info(i18n.Text("Selected endpoint: ", "已选择节点: ") + ep.IP + " (" + ep.Desc + ")")
-			return ep
+		if cfTimedOut && aliTimedOut {
+			bus.Warn(i18n.Text("Dual DoH (CF + Ali) both timed out. Fallback to system DNS.", "双 DoH（CF + Ali）均超时，回退系统 DNS。"))
+			fb := resolveSystemFn(host)
+			if fb != "" {
+				ep := Endpoint{IP: fb, Desc: i18n.Text("system DNS fallback", "系统 DNS 回退")}
+				bus.Info(i18n.Text("Selected endpoint: ", "已选择节点: ") + ep.IP + " (" + ep.Desc + ")")
+				return ep
+			}
+			bus.Warn(i18n.Text("Could not resolve endpoint IP, continue with default DNS.", "无法解析节点 IP，继续使用默认 DNS。"))
+			return Endpoint{}
 		}
+		bus.Warn(i18n.Text("Dual DoH returned no IPv4 endpoint, continue with default DNS.", "双 DoH 未返回 IPv4 节点，继续使用默认 DNS。"))
 		bus.Warn(i18n.Text("Could not resolve endpoint IP, continue with default DNS.", "无法解析节点 IP，继续使用默认 DNS。"))
 		return Endpoint{}
 	}
 
 	endpoints := make([]Endpoint, 0, len(ips))
 	for _, ip := range ips {
-		desc := fetchIPDesc(ctx, ip)
+		desc := fetchIPDescFn(ctx, ip)
 		endpoints = append(endpoints, Endpoint{IP: ip, Desc: desc})
 	}
 
@@ -94,75 +120,171 @@ type dohResponse struct {
 	} `json:"Answer"`
 }
 
-func resolveDoH(ctx context.Context, host string) []string {
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
-			}
-		}
-		ips, err := doResolveDoH(ctx, host)
-		if err != nil {
-			continue
-		}
-		return ips
-	}
-	return nil
+// resolveDoHDual concurrently queries both CF and Ali DoH providers.
+// It returns the merged (CF first, Ali second, deduplicated) IP list and
+// each provider's timeout status.
+func resolveDoHDual(ctx context.Context, host string) ([]string, bool, bool) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	var cfRes, aliRes dohResult
+
+	// Cloudflare DoH
+	go func() {
+		defer wg.Done()
+		cfRes = queryCFDoH(ctx, host)
+	}()
+
+	// AliDNS DoH
+	go func() {
+		defer wg.Done()
+		aliRes = queryAliDoH(ctx, host)
+	}()
+
+	wg.Wait()
+
+	// Merge: CF first, Ali second, deduplicated
+	merged := mergeIPs(cfRes.ips, aliRes.ips)
+	return merged, cfRes.timedOut, aliRes.timedOut
 }
 
-func doResolveDoH(ctx context.Context, host string) ([]string, error) {
-	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+// queryCFDoH queries Cloudflare DoH (application/dns-json format).
+func queryCFDoH(ctx context.Context, host string) dohResult {
+	ctx2, cancel := context.WithTimeout(ctx, dohTimeout)
 	defer cancel()
 
-	reqURL := fmt.Sprintf("https://dns.alidns.com/resolve?name=%s&type=A&short=1", host)
+	reqURL := fmt.Sprintf(cfDoHURLTemplate, host)
 	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return nil, err
+		return dohResult{err: err}
 	}
-	resp, err := http.DefaultClient.Do(req)
+	req.Header.Set("Accept", "application/dns-json")
+
+	resp, err := dohHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return dohResult{timedOut: isTimeoutErr(err), err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return dohResult{err: fmt.Errorf("HTTP %d", resp.StatusCode)}
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return dohResult{timedOut: isTimeoutErr(err), err: err}
+	}
+	ips := extractIPsFromBody(body)
+	return dohResult{ips: ips}
+}
+
+// queryAliDoH queries AliDNS DoH (short=1 format).
+func queryAliDoH(ctx context.Context, host string) dohResult {
+	ctx2, cancel := context.WithTimeout(ctx, dohTimeout)
+	defer cancel()
+
+	reqURL := fmt.Sprintf(aliDoHURLTemplate, host)
+	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return dohResult{err: err}
 	}
 
+	resp, err := dohHTTPClient.Do(req)
+	if err != nil {
+		return dohResult{timedOut: isTimeoutErr(err), err: err}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return dohResult{err: fmt.Errorf("HTTP %d", resp.StatusCode)}
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return dohResult{timedOut: isTimeoutErr(err), err: err}
+	}
+	ips := extractIPsFromBody(body)
+	return dohResult{ips: ips}
+}
+
+// extractIPsFromBody tries JSON structured parsing first, then falls back to
+// regex extraction. Returns deduplicated IPv4 addresses preserving order.
+func extractIPsFromBody(body []byte) []string {
+	// Try structured JSON first
 	var dr dohResponse
 	if json.Unmarshal(body, &dr) == nil && len(dr.Answer) > 0 {
 		seen := map[string]bool{}
 		var out []string
 		for _, a := range dr.Answer {
 			ip := strings.TrimSpace(a.Data)
-			if net.ParseIP(ip) != nil && !seen[ip] {
+			parsed := net.ParseIP(ip)
+			if parsed != nil && parsed.To4() != nil && !seen[ip] {
 				seen[ip] = true
 				out = append(out, ip)
 			}
 		}
 		if len(out) > 0 {
-			return out, nil
+			return out
 		}
 	}
 
+	// Regex fallback
 	all := ipv4Re.FindAllString(string(body), -1)
 	seen := map[string]bool{}
 	var out []string
 	for _, ip := range all {
+		parsed := net.ParseIP(ip)
+		if parsed == nil || parsed.To4() == nil {
+			continue
+		}
 		if !seen[ip] {
 			seen[ip] = true
 			out = append(out, ip)
 		}
 	}
-	if len(out) > 0 {
-		return out, nil
+	return out
+}
+
+// mergeIPs merges two IP slices (first before second) and deduplicates.
+func mergeIPs(first, second []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, ip := range first {
+		parsed := net.ParseIP(ip)
+		if parsed == nil || parsed.To4() == nil {
+			continue
+		}
+		if !seen[ip] {
+			seen[ip] = true
+			out = append(out, ip)
+		}
 	}
-	return nil, fmt.Errorf("no IPs found in DoH response")
+	for _, ip := range second {
+		parsed := net.ParseIP(ip)
+		if parsed == nil || parsed.To4() == nil {
+			continue
+		}
+		if !seen[ip] {
+			seen[ip] = true
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// isTimeoutErr checks whether an error is a timeout (context deadline exceeded
+// or net.Error timeout).
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == context.DeadlineExceeded {
+		return true
+	}
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		return true
+	}
+	// Also check wrapped errors
+	if ue, ok := err.(*url.Error); ok {
+		return isTimeoutErr(ue.Err)
+	}
+	return false
 }
 
 // ResolveHost tries system DNS and returns the first IPv4 address, or "".
