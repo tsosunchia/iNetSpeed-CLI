@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/config"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/render"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/runner"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/config"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/runner"
 )
 
 var (

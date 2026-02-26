@@ -1,7 +1,7 @@
 package runner
 
 import (
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/endpoint"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/endpoint"
 	"testing"
 )
 

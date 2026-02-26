@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────
-MODULE="github.com/tsosunchia/apple-cdn-network-bench"
+MODULE="github.com/tsosunchia/iNetSpeed-CLI"
 BINARY="speedtest"
 DIST="dist"
 

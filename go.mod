@@ -1,4 +1,4 @@
-module github.com/tsosunchia/apple-cdn-network-bench
+module github.com/tsosunchia/iNetSpeed-CLI
 
 go 1.25.0
 

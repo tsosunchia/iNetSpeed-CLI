@@ -20,7 +20,7 @@ curl -sL nxtrace.org/speedtest_install | bash
 
 macOS / Windows：从 Releases 下载预编译包后直接运行：
 
-- <https://github.com/tsosunchia/apple-cdn-network-bench/releases/latest>
+- <https://github.com/tsosunchia/iNetSpeed-CLI/releases/latest>
 
 从源码直接运行：
 

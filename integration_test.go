@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/config"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/latency"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/render"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/transfer"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/config"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/latency"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/transfer"
 )
 
 // mockCDN creates a test server that mimics the Apple CDN endpoints.

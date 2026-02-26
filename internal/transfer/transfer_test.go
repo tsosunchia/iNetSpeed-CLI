@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/config"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/render"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/config"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
 )
 
 func TestZeroReader(t *testing.T) {

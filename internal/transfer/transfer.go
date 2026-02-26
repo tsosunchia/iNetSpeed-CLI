@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/config"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/render"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/config"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
 )
 
 type Direction int

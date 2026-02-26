@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="tsosunchia/apple-cdn-network-bench"
+REPO="tsosunchia/iNetSpeed-CLI"
 BINARY="speedtest"
 RELEASE_BASE="https://github.com/${REPO}/releases/latest/download"
 RELEASES_URL="https://github.com/${REPO}/releases/latest"

@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/config"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/endpoint"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/latency"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/netx"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/render"
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/transfer"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/config"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/endpoint"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/latency"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/netx"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/transfer"
 )
 
 // Run executes the full speedtest pipeline. Exit codes: 0 success, 2 degraded, 130 interrupted.

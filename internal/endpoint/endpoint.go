@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tsosunchia/apple-cdn-network-bench/internal/render"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
 )
 
 var ipv4Re = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
