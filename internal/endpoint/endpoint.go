@@ -99,7 +99,12 @@ func Choose(ctx context.Context, host string, bus *render.Bus, isTTY bool) Endpo
 	if len(endpoints) > 1 && isTTY {
 		// Ensure all queued endpoint lines are rendered before interactive prompt.
 		bus.Flush()
-		choice = promptChoice(len(endpoints), bus)
+		var cancelled bool
+		choice, cancelled = promptChoice(ctx, len(endpoints), bus)
+		if cancelled {
+			bus.Warn(i18n.Text("Interrupted.", "已中断。"))
+			return Endpoint{}
+		}
 	}
 	selected := endpoints[choice]
 	bus.Info(fmt.Sprintf(i18n.Text("Selected endpoint: %s (%s)", "已选择节点: %s (%s)"), selected.IP, selected.Desc))
@@ -419,27 +424,56 @@ func doFetchInfo(ctx context.Context, target string) (IPInfo, error) {
 	return info, nil
 }
 
-func promptChoice(count int, bus *render.Bus) int {
+// promptChoice displays an interactive prompt and waits for user input.
+// It returns (choiceIndex, cancelled). When ctx is cancelled (e.g. Ctrl+C),
+// the tty is closed to unblock the read and cancelled=true is returned.
+func promptChoice(ctx context.Context, count int, bus *render.Bus) (int, bool) {
 	fmt.Fprintf(os.Stderr, "  \033[36m\033[1m[?]\033[0m %s", fmt.Sprintf(i18n.Text("Select endpoint [1-%d, Enter=1]: ", "选择节点 [1-%d，回车=1]: "), count))
 
 	tty, shouldClose, err := openPromptInput()
 	if err != nil {
 		bus.Warn(i18n.Text("Interactive input unavailable, defaulting to endpoint 1.", "交互输入不可用，默认使用节点 1。"))
-		return 0
+		return 0, false
 	}
-	if shouldClose {
-		defer tty.Close()
-	}
-	reader := bufio.NewReader(tty)
 
-	line, _ := reader.ReadString('\n')
-	choice, ok := parseChoice(line, count)
-	if !ok {
-		line = strings.TrimSpace(line)
-		bus.Warn(fmt.Sprintf(i18n.Text("Invalid selection '%s', fallback to 1.", "选择无效 '%s'，回退到 1。"), line))
-		return 0
+	type readResult struct {
+		line string
+		err  error
 	}
-	return choice
+	ch := make(chan readResult, 1)
+
+	go func() {
+		reader := bufio.NewReader(tty)
+		line, err := reader.ReadString('\n')
+		ch <- readResult{line, err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Context cancelled (e.g. Ctrl+C). Close the tty to try to
+		// unblock the goroutine. We do NOT wait for the goroutine:
+		// on some OSes (macOS) closing a tty won't unblock a concurrent
+		// read, and the process is about to exit anyway.
+		if shouldClose {
+			tty.Close()
+		}
+		return 0, true
+	case res := <-ch:
+		if shouldClose {
+			tty.Close()
+		}
+		if res.err != nil && res.line == "" {
+			// EOF or read error with no data — treat as default
+			return 0, false
+		}
+		choice, ok := parseChoice(res.line, count)
+		if !ok {
+			line := strings.TrimSpace(res.line)
+			bus.Warn(fmt.Sprintf(i18n.Text("Invalid selection '%s', fallback to 1.", "选择无效 '%s'，回退到 1。"), line))
+			return 0, false
+		}
+		return choice, false
+	}
 }
 
 func openPromptInput() (*os.File, bool, error) {

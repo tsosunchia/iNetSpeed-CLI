@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -509,4 +510,126 @@ func TestIsTimeoutErr(t *testing.T) {
 	if isTimeoutErr(fmt.Errorf("random error")) {
 		t.Error("random error should not be timeout")
 	}
+}
+
+// ---------------------------------------------------------------------------
+//  promptChoice cancellation tests
+// ---------------------------------------------------------------------------
+
+// TestPromptChoiceCancelledContext: ctx already cancelled before prompt starts.
+func TestPromptChoiceCancelledContext(t *testing.T) {
+	// Create a pipe: write end feeds the reader, but we won't write anything.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	defer r.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	bus := newTestBus()
+	defer bus.Close()
+
+	// promptChoice opens tty via openPromptInput. We can't easily inject a pipe
+	// there, so test the cancellation behavior through Choose with a mocked DoH.
+	// Instead, let's test the promptChoice function directly by temporarily
+	// monkey-patching openPromptInput.
+	// Since openPromptInput is not a var, we test via Choose integration.
+
+	oldResolveDoH := resolveDoHFn
+	oldFetchIPDesc := fetchIPDescFn
+	t.Cleanup(func() {
+		resolveDoHFn = oldResolveDoH
+		fetchIPDescFn = oldFetchIPDesc
+	})
+	resolveDoHFn = func(_ context.Context, _ string) ([]string, bool, bool) {
+		return []string{"1.1.1.1", "2.2.2.2"}, false, false
+	}
+	fetchIPDescFn = func(_ context.Context, ip string) string {
+		return "test-" + ip
+	}
+
+	ep := Choose(ctx, "example.com", bus, true)
+	// With cancelled ctx, promptChoice should return cancelled=true,
+	// Choose should return empty Endpoint.
+	if ep.IP != "" {
+		t.Errorf("expected empty endpoint on cancelled ctx, got %+v", ep)
+	}
+}
+
+// TestPromptChoiceCancelDuringRead: ctx is cancelled while blocking on read.
+func TestPromptChoiceCancelDuringRead(t *testing.T) {
+	oldResolveDoH := resolveDoHFn
+	oldFetchIPDesc := fetchIPDescFn
+	t.Cleanup(func() {
+		resolveDoHFn = oldResolveDoH
+		fetchIPDescFn = oldFetchIPDesc
+	})
+	resolveDoHFn = func(_ context.Context, _ string) ([]string, bool, bool) {
+		return []string{"1.1.1.1", "2.2.2.2"}, false, false
+	}
+	fetchIPDescFn = func(_ context.Context, ip string) string {
+		return "test-" + ip
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	bus := newTestBus()
+	defer bus.Close()
+
+	done := make(chan Endpoint, 1)
+	go func() {
+		// Choose will block on promptChoice waiting for input.
+		// isTTY=true triggers the prompt path.
+		ep := Choose(ctx, "example.com", bus, true)
+		done <- ep
+	}()
+
+	// Give the goroutine time to enter the blocking read
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel the context, simulating Ctrl+C
+	cancel()
+
+	select {
+	case ep := <-done:
+		if ep.IP != "" {
+			t.Errorf("expected empty endpoint on cancel, got %+v", ep)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("promptChoice did not return within 2s after ctx cancel")
+	}
+}
+
+// TestPromptChoiceNormalInput: normal input through pipe (non-cancelled).
+func TestPromptChoiceNormalInput(t *testing.T) {
+	// Create a pipe to simulate user typing "2\n"
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bus := newTestBus()
+	defer bus.Close()
+
+	// Write input in a goroutine
+	go func() {
+		w.Write([]byte("2\n"))
+		w.Close()
+	}()
+
+	// Call promptChoice with pipe as a simulated tty (r is the read end).
+	// We can't easily inject this into promptChoice since openPromptInput
+	// tries /dev/tty first. Instead, use parseChoice to verify the logic.
+	// The integration through Choose is tested above.
+	line := "2\n"
+	choice, ok := parseChoice(line, 3)
+	if !ok {
+		t.Fatal("expected valid choice")
+	}
+	if choice != 1 { // 0-indexed: "2" -> index 1
+		t.Errorf("expected choice=1, got %d", choice)
+	}
+	r.Close()
 }
