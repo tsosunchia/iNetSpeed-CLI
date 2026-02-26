@@ -2,7 +2,7 @@
 set -f
 
 # ============================================================
-#  Apple CDN Speedtest  —  one-key script
+#  iNetSpeed-CLI  —  one-key script
 #  Usage:  curl -sL <url> | bash
 #
 #  Env overrides:
@@ -33,13 +33,88 @@ if [ "$is_tty" -eq 1 ]; then
   r="$(printf '\033[31m')"
 fi
 
+detect_lang() {
+  if [ -n "$SPEEDTEST_LANG" ]; then
+    _lang="$(printf "%s" "$SPEEDTEST_LANG" | tr '[:upper:]' '[:lower:]')"
+    case "$_lang" in
+      zh*) printf "zh" ;;
+      *) printf "en" ;;
+    esac
+    return
+  fi
+
+  for _lang in "$LC_ALL" "$LC_MESSAGES" "$LANGUAGE" "$LANG"; do
+    _lang="$(printf "%s" "$_lang" | tr '[:upper:]' '[:lower:]')"
+    case "$_lang" in
+      zh*) printf "zh"; return ;;
+    esac
+  done
+  printf "en"
+}
+
+LANG_MODE="$(detect_lang)"
+is_zh() { [ "$LANG_MODE" = "zh" ]; }
+
+msg() {
+  _m="$1"
+  if ! is_zh; then
+    printf "%s" "$_m"
+    return
+  fi
+  case "$_m" in
+    "Environment Check") printf "环境检查" ;;
+    "Missing required command: "*) printf "缺少必需命令: %s" "${_m#Missing required command: }" ;;
+    "Install hint: "*) printf "安装提示: %s" "${_m#Install hint: }" ;;
+    "Environment check failed. Install required tools and rerun.") printf "环境检查失败。请先安装依赖后重试。" ;;
+    "curl does not include HTTP/2 support.") printf "curl 未包含 HTTP/2 支持。" ;;
+    "A curl build with HTTP/2 support is required.") printf "需要支持 HTTP/2 的 curl 版本。" ;;
+    "No DNS helper found (getent/dig/host/nslookup/ping).") printf "未发现 DNS 辅助命令（getent/dig/host/nslookup/ping）。" ;;
+    "Server IP detection may be unavailable.") printf "服务端 IP 识别可能不可用。" ;;
+    "Optional tool 'pv' not found. Live progress meter is unavailable.") printf "未找到可选工具 pv，无法显示实时进度。" ;;
+    "Environment check passed.") printf "环境检查通过。" ;;
+    "Endpoint Selection") printf "节点选择" ;;
+    "Could not parse host from DL_URL. Skip endpoint selection.") printf "无法从 DL_URL 解析主机，跳过节点选择。" ;;
+    "Host: "*) printf "主机: %s" "${_m#Host: }" ;;
+    "DoH: "*) printf "DoH: %s" "${_m#DoH: }" ;;
+    "AliDNS DoH returned no IPv4 endpoint. Fallback to system DNS.") printf "AliDNS DoH 未返回 IPv4 节点，回退到系统 DNS。" ;;
+    "Selected endpoint: "*) printf "已选择节点: %s" "${_m#Selected endpoint: }" ;;
+    "Could not resolve endpoint IP, continue with default DNS.") printf "无法解析节点 IP，继续使用默认 DNS。" ;;
+    "Available endpoints:") printf "可用节点:" ;;
+    "No endpoint candidates, continue with default DNS.") printf "没有可用节点，继续使用默认 DNS。" ;;
+    "Invalid selection "*) printf "选择无效，回退到 1。(%s)" "${_m#Invalid selection }" ;;
+    "Selection out of range, fallback to 1.") printf "选择超出范围，回退到 1。" ;;
+    "Non-interactive shell detected, default endpoint 1.") printf "检测到非交互式终端，默认使用节点 1。" ;;
+    "Could not parse selected endpoint, continue with default DNS.") printf "无法解析所选节点，继续使用默认 DNS。" ;;
+    "Connection Information") printf "连接信息" ;;
+    "Client") printf "客户端" ;;
+    "Server") printf "服务端" ;;
+    "  Location") printf "  位置" ;;
+    "  Endpoint") printf "  节点" ;;
+    "Idle Latency") printf "空载延迟" ;;
+    "Endpoint: "*) printf "端点: %s" "${_m#Endpoint: }" ;;
+    "Samples: "*) printf "采样: %s" "${_m#Samples: }" ;;
+    "Download (single thread)") printf "下载（单线程）" ;;
+    "Download (multi-thread)") printf "下载（多线程）" ;;
+    "Upload (single thread)") printf "上传（单线程）" ;;
+    "Upload (multi-thread)") printf "上传（多线程）" ;;
+    "Threads: "*) printf "线程: %s" "${_m#Threads: }" ;;
+    "Limit: "*) printf "上限: %s" "${_m#Limit: }" ;;
+    "Loaded latency: "*) printf "负载延迟: %s" "${_m#Loaded latency: }" ;;
+    "Data Used") printf "消耗流量" ;;
+    "All tests complete.") printf "所有测试完成。" ;;
+    "Config:") printf "配置:" ;;
+    "Summary") printf "测速汇总" ;;
+    *) printf "%s" "$_m" ;;
+  esac
+}
+
 line(){   printf "%s\n" "${d}────────────────────────────────────────────────────────────${c0}" >&2; }
-hdr(){    printf "\n%s%s  ▸ %s%s\n" "$cy" "$B" "$*" "$c0" >&2; }
-info(){   printf "  %s%s[+]%s %s\n" "$g" "$B" "$c0" "$*" >&2; }
-warn(){   printf "  %s%s[!]%s %s\n" "$y" "$B" "$c0" "$*" >&2; }
-result(){ printf "  %s%s    ➜  %s%s\n" "$g" "$B" "$*" "$c0" >&2; }
-kv(){     printf "  %s%s%-18s%s %s\n" "$d" "$B" "$1:" "$c0" "$2" >&2; }
-fatal(){  printf "  %s%s[✗]%s %s\n" "$r" "$B" "$c0" "$*" >&2; exit 1; }
+hdr(){    printf "\n%s%s  ▸ %s%s\n" "$cy" "$B" "$(msg "$*")" "$c0" >&2; }
+info(){   printf "  %s%s[+]%s %s\n" "$g" "$B" "$c0" "$(msg "$*")" >&2; }
+warn(){   printf "  %s%s[!]%s %s\n" "$y" "$B" "$c0" "$(msg "$*")" >&2; }
+result(){ printf "  %s%s    ➜  %s%s\n" "$g" "$B" "$(msg "$*")" "$c0" >&2; }
+kv(){     printf "  %s%s%-18s%s %s\n" "$d" "$B" "$(msg "$1"):" "$c0" "$2" >&2; }
+fatal(){  printf "  %s%s[✗]%s %s\n" "$r" "$B" "$c0" "$(msg "$*")" >&2; exit 1; }
 
 pkg_install_hint() {
   _pkg="$1"
@@ -261,7 +336,11 @@ choose_endpoint() {
   _choice=1
   if [ "$_count" -gt 1 ]; then
     if [ "$is_tty" -eq 1 ] && tty -s 2>/dev/null && [ -r /dev/tty ] && [ -w /dev/tty ]; then
-      printf "  %s%s[?]%s Select endpoint [1-%s, Enter=1]: " "$cy" "$B" "$c0" "$_count" > /dev/tty
+      if is_zh; then
+        printf "  %s%s[?]%s 选择节点 [1-%s，回车=1]: " "$cy" "$B" "$c0" "$_count" > /dev/tty
+      else
+        printf "  %s%s[?]%s Select endpoint [1-%s, Enter=1]: " "$cy" "$B" "$c0" "$_count" > /dev/tty
+      fi
       IFS= read -r _pick < /dev/tty 2>/dev/null || _pick=""
       case "$_pick" in
         "") _choice=1 ;;
@@ -390,7 +469,11 @@ test_idle_latency() {
   rm -f "$tmpf"
 
   IDLE_LATENCY="$lat_med"; IDLE_JITTER="$lat_jit"
-  result "${lat_med} ms median  (min ${lat_min} / avg ${lat_avg} / max ${lat_max})  jitter ${lat_jit} ms"
+  if is_zh; then
+    result "${lat_med} 毫秒 中位数  (最小 ${lat_min} / 平均 ${lat_avg} / 最大 ${lat_max})  抖动 ${lat_jit} 毫秒"
+  else
+    result "${lat_med} ms median  (min ${lat_min} / avg ${lat_avg} / max ${lat_max})  jitter ${lat_jit} ms"
+  fi
 }
 
 # ────────────────────────────────────────────────────────────
@@ -543,7 +626,11 @@ run_transfer_test() {
   _maxb="$(to_bytes "$MAX")"
 
   info "Threads: $_threads"
-  info "Limit: $MAX / ${TIMEOUT}s per thread"
+  if is_zh; then
+    info "Limit: $MAX / 每线程 ${TIMEOUT}s"
+  else
+    info "Limit: $MAX / ${TIMEOUT}s per thread"
+  fi
 
   start_loaded_latency
 
@@ -591,11 +678,23 @@ run_transfer_test() {
   TOTAL_DATA=$((TOTAL_DATA + _total_bytes))
 
   if [ "$_threads" -le 1 ]; then
-    result "${_mbps} Mbps  (${_human} in ${_wall}s)"
+    if is_zh; then
+      result "${_mbps} Mbps  (${_human}，耗时 ${_wall}s)"
+    else
+      result "${_mbps} Mbps  (${_human} in ${_wall}s)"
+    fi
   else
-    result "${_mbps} Mbps  (${_human} in ${_wall}s, ${_threads} threads)"
+    if is_zh; then
+      result "${_mbps} Mbps  (${_human}，耗时 ${_wall}s，${_threads} 线程)"
+    else
+      result "${_mbps} Mbps  (${_human} in ${_wall}s, ${_threads} threads)"
+    fi
   fi
-  info "Loaded latency: ${_ll_med} ms  (jitter ${_ll_jit} ms)"
+  if is_zh; then
+    info "Loaded latency: ${_ll_med} 毫秒  (抖动 ${_ll_jit} 毫秒)"
+  else
+    info "Loaded latency: ${_ll_med} ms  (jitter ${_ll_jit} ms)"
+  fi
 }
 
 # ============================================================
@@ -605,8 +704,13 @@ TOTAL_DATA=0
 
 printf "\n" >&2
 line
-printf "  %s%s⚡ Apple CDN Speedtest%s\n" "$cy" "$B" "$c0" >&2
-printf "  %s%sConfig:%s  timeout=%ss  max=%s  threads=%s\n" "$d" "$B" "$c0" "$TIMEOUT" "$MAX" "$THREADS" >&2
+if is_zh; then
+  printf "  %s%s⚡ iNetSpeed-CLI%s\n" "$cy" "$B" "$c0" >&2
+  printf "  %s%s%s%s  timeout=%ss  max=%s  threads=%s\n" "$d" "$B" "$(msg "Config:")" "$c0" "$TIMEOUT" "$MAX" "$THREADS" >&2
+else
+  printf "  %s%s⚡ iNetSpeed-CLI%s\n" "$cy" "$B" "$c0" >&2
+  printf "  %s%sConfig:%s  timeout=%ss  max=%s  threads=%s\n" "$d" "$B" "$c0" "$TIMEOUT" "$MAX" "$THREADS" >&2
+fi
 line
 
 check_environment
@@ -623,9 +727,13 @@ total_human="$(human_bytes "$TOTAL_DATA")"
 
 printf "\n" >&2
 line
-printf "  %s%s📊 Summary%s\n" "$cy" "$B" "$c0" >&2
+printf "  %s%s📊 %s%s\n" "$cy" "$B" "$(msg "Summary")" "$c0" >&2
 line
-kv "Idle Latency" "${IDLE_LATENCY} ms  (jitter ${IDLE_JITTER} ms)"
+if is_zh; then
+  kv "Idle Latency" "${IDLE_LATENCY} 毫秒  (抖动 ${IDLE_JITTER} 毫秒)"
+else
+  kv "Idle Latency" "${IDLE_LATENCY} ms  (jitter ${IDLE_JITTER} ms)"
+fi
 kv "Data Used" "$total_human"
 line
 info "All tests complete."

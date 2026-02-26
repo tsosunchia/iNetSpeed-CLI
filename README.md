@@ -80,6 +80,9 @@ TIMEOUT=5 MAX=1G THREADS=8 LATENCY_COUNT=10 go run ./cmd/speedtest/
 
 # Go：命令行方式（优先级高于环境变量）
 ./speedtest --timeout 5 --max 1G --threads 8 --latency-count 10
+
+# Go：强制中文输出（参数优先级高于环境变量）
+./speedtest --lang zh
 ```
 
 ## Demo
@@ -139,6 +142,7 @@ curl -sL nxtrace.org/speedtest_install | bash
 | `TIMEOUT` | `10` | 每线程传输超时（秒） |
 | `THREADS` | `4` | 多线程并发数 |
 | `LATENCY_COUNT` | `20` | 空载延迟采样次数 |
+| `SPEEDTEST_LANG` | 自动 | 输出语言，`zh` 显示中文，其他显示英文（未设置时读取 `LC_ALL/LC_MESSAGES/LANGUAGE/LANG`） |
 
 ### 命令行参数（优先级高于环境变量）
 
@@ -151,6 +155,7 @@ curl -sL nxtrace.org/speedtest_install | bash
 | `--timeout` | `TIMEOUT` | 每线程传输超时（秒） |
 | `--threads` | `THREADS` | 多线程并发数 |
 | `--latency-count` | `LATENCY_COUNT` | 空载延迟采样次数 |
+| `--lang` | `SPEEDTEST_LANG` | 输出语言，`zh` 显示中文，其他显示英文（优先级高于环境变量） |
 
 ### 输出模式
 

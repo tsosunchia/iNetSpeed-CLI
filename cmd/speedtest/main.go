@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/config"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/i18n"
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/runner"
 )
@@ -20,8 +21,13 @@ var (
 )
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "-v" || os.Args[1] == "--version" || os.Args[1] == "version") {
-		fmt.Printf("speedtest %s (commit %s, built %s)\n", version, commit, date)
+	i18n.SetFromEnv()
+	if lang, ok := i18n.FindLangArg(os.Args[1:]); ok {
+		i18n.Set(lang)
+	}
+
+	if isVersionRequest(os.Args[1:]) {
+		fmt.Printf(i18n.Text("speedtest %s (commit %s, built %s)\n", "speedtest %s（commit %s，构建于 %s）\n"), version, commit, date)
 		os.Exit(0)
 	}
 
@@ -53,4 +59,13 @@ func main() {
 	exitCode := runner.Run(ctx, cfg, bus, isTTY)
 	bus.Close()
 	os.Exit(exitCode)
+}
+
+func isVersionRequest(args []string) bool {
+	for _, arg := range args {
+		if arg == "-v" || arg == "--version" || arg == "version" {
+			return true
+		}
+	}
+	return false
 }

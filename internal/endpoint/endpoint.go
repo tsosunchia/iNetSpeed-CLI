@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/i18n"
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
 )
 
@@ -37,23 +38,23 @@ type IPInfo struct {
 }
 
 func Choose(ctx context.Context, host string, bus *render.Bus, isTTY bool) Endpoint {
-	bus.Header("Endpoint Selection")
+	bus.Header(i18n.Text("Endpoint Selection", "节点选择"))
 	if host == "" {
-		bus.Warn("Could not parse host from DL_URL. Skip endpoint selection.")
+		bus.Warn(i18n.Text("Could not parse host from DL_URL. Skip endpoint selection.", "无法从 DL_URL 解析主机，跳过节点选择。"))
 		return Endpoint{}
 	}
-	bus.Info("Host: " + host)
+	bus.Info(i18n.Text("Host: ", "主机: ") + host)
 
 	ips := resolveDoH(ctx, host)
 	if len(ips) == 0 {
-		bus.Warn("AliDNS DoH returned no IPv4 endpoint. Fallback to system DNS.")
+		bus.Warn(i18n.Text("AliDNS DoH returned no IPv4 endpoint. Fallback to system DNS.", "AliDNS DoH 未返回 IPv4 节点，回退系统 DNS。"))
 		fb := resolveSystem(host)
 		if fb != "" {
-			ep := Endpoint{IP: fb, Desc: "system DNS fallback"}
-			bus.Info("Selected endpoint: " + ep.IP + " (" + ep.Desc + ")")
+			ep := Endpoint{IP: fb, Desc: i18n.Text("system DNS fallback", "系统 DNS 回退")}
+			bus.Info(i18n.Text("Selected endpoint: ", "已选择节点: ") + ep.IP + " (" + ep.Desc + ")")
 			return ep
 		}
-		bus.Warn("Could not resolve endpoint IP, continue with default DNS.")
+		bus.Warn(i18n.Text("Could not resolve endpoint IP, continue with default DNS.", "无法解析节点 IP，继续使用默认 DNS。"))
 		return Endpoint{}
 	}
 
@@ -63,7 +64,7 @@ func Choose(ctx context.Context, host string, bus *render.Bus, isTTY bool) Endpo
 		endpoints = append(endpoints, Endpoint{IP: ip, Desc: desc})
 	}
 
-	bus.Info("Available endpoints:")
+	bus.Info(i18n.Text("Available endpoints:", "可用节点:"))
 	for i, ep := range endpoints {
 		bus.Info(fmt.Sprintf("  %d) %s  %s", i+1, ep.IP, ep.Desc))
 	}
@@ -73,7 +74,7 @@ func Choose(ctx context.Context, host string, bus *render.Bus, isTTY bool) Endpo
 		choice = promptChoice(len(endpoints), bus)
 	}
 	selected := endpoints[choice]
-	bus.Info(fmt.Sprintf("Selected endpoint: %s (%s)", selected.IP, selected.Desc))
+	bus.Info(fmt.Sprintf(i18n.Text("Selected endpoint: %s (%s)", "已选择节点: %s (%s)"), selected.IP, selected.Desc))
 	return selected
 }
 
@@ -185,7 +186,7 @@ func fetchIPDesc(ctx context.Context, ip string) string {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return "lookup failed"
+				return i18n.Text("lookup failed", "查询失败")
 			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
 			}
 		}
@@ -195,7 +196,7 @@ func fetchIPDesc(ctx context.Context, ip string) string {
 		}
 		return desc
 	}
-	return "lookup failed"
+	return i18n.Text("lookup failed", "查询失败")
 }
 
 func doFetchIPDesc(ctx context.Context, ip string) (string, error) {
@@ -232,7 +233,7 @@ func doFetchIPDesc(ctx context.Context, ip string) (string, error) {
 		loc += ", " + info.Country
 	}
 	if loc == "" {
-		loc = "unknown location"
+		loc = i18n.Text("unknown location", "未知位置")
 	}
 	asn := info.AS
 	if asn == "" {
@@ -295,11 +296,11 @@ func doFetchInfo(ctx context.Context, target string) (IPInfo, error) {
 }
 
 func promptChoice(count int, bus *render.Bus) int {
-	fmt.Fprintf(os.Stderr, "  \033[36m\033[1m[?]\033[0m Select endpoint [1-%d, Enter=1]: ", count)
+	fmt.Fprintf(os.Stderr, "  \033[36m\033[1m[?]\033[0m %s", fmt.Sprintf(i18n.Text("Select endpoint [1-%d, Enter=1]: ", "选择节点 [1-%d，回车=1]: "), count))
 
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
-		bus.Warn("/dev/tty unavailable, defaulting to endpoint 1.")
+		bus.Warn(i18n.Text("/dev/tty unavailable, defaulting to endpoint 1.", "/dev/tty 不可用，默认使用节点 1。"))
 		return 0
 	}
 	defer tty.Close()
@@ -312,7 +313,7 @@ func promptChoice(count int, bus *render.Bus) int {
 	}
 	n, err := strconv.Atoi(line)
 	if err != nil || n < 1 || n > count {
-		bus.Warn(fmt.Sprintf("Invalid selection '%s', fallback to 1.", line))
+		bus.Warn(fmt.Sprintf(i18n.Text("Invalid selection '%s', fallback to 1.", "选择无效 '%s'，回退到 1。"), line))
 		return 0
 	}
 	return n - 1

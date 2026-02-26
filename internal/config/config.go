@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/i18n"
 )
 
 const (
@@ -36,6 +38,29 @@ type Config struct {
 }
 
 func Usage() string {
+	if i18n.IsZH() {
+		return fmt.Sprintf(`用法:
+  speedtest [选项]
+  speedtest help
+
+选项:
+  -h, --help                    显示帮助信息
+  -v, --version                 显示版本
+  --lang LANG                   输出语言：zh 显示中文，其他显示英文（默认读取 SPEEDTEST_LANG/LC_ALL/LC_MESSAGES/LANGUAGE/LANG）
+  --dl-url URL                  下载测速地址（默认取 DL_URL 或 %q）
+  --ul-url URL                  上传测速地址（默认取 UL_URL 或 %q）
+  --latency-url URL             延迟测速地址（默认取 LATENCY_URL 或 %q）
+  --max SIZE                    单线程流量上限，如 2G/500M/1GiB（默认取 MAX 或 %q）
+  --timeout SECONDS             单线程超时（秒），范围 1-120（默认取 TIMEOUT 或 %d）
+  --threads N                   并发线程数，范围 1-64（默认取 THREADS 或 %d）
+  --latency-count N             延迟采样次数，范围 1-100（默认取 LATENCY_COUNT 或 %d）
+
+环境变量:
+  DL_URL, UL_URL, LATENCY_URL, MAX, TIMEOUT, THREADS, LATENCY_COUNT
+  SPEEDTEST_LANG, LC_ALL, LC_MESSAGES, LANGUAGE, LANG
+`, DefaultDLURL, DefaultULURL, DefaultLatencyURL, DefaultMax, DefaultTimeout, DefaultThreads, DefaultLatencyCount)
+	}
+
 	return fmt.Sprintf(`Usage:
   speedtest [options]
   speedtest help
@@ -43,6 +68,7 @@ func Usage() string {
 Options:
   -h, --help                    Show this help message
   -v, --version                 Show version
+  --lang LANG                   Output language: zh for Chinese, others for English (default from SPEEDTEST_LANG/LC_ALL/LC_MESSAGES/LANGUAGE/LANG)
   --dl-url URL                  Download test URL (default from DL_URL or %q)
   --ul-url URL                  Upload test URL (default from UL_URL or %q)
   --latency-url URL             Latency test URL (default from LATENCY_URL or %q)
@@ -53,10 +79,17 @@ Options:
 
 Environment variables:
   DL_URL, UL_URL, LATENCY_URL, MAX, TIMEOUT, THREADS, LATENCY_COUNT
+  SPEEDTEST_LANG, LC_ALL, LC_MESSAGES, LANGUAGE, LANG
 `, DefaultDLURL, DefaultULURL, DefaultLatencyURL, DefaultMax, DefaultTimeout, DefaultThreads, DefaultLatencyCount)
 }
 
 func Load(args ...string) (*Config, error) {
+	langValue := ""
+	if v, ok := i18n.FindLangArg(args); ok {
+		langValue = v
+	}
+	i18n.Set(i18n.Resolve(langValue))
+
 	if len(args) == 1 && args[0] == "help" {
 		return nil, ErrHelp
 	}
@@ -76,6 +109,7 @@ func Load(args ...string) (*Config, error) {
 		help := false
 		fs.BoolVar(&help, "h", false, "show help")
 		fs.BoolVar(&help, "help", false, "show help")
+		fs.StringVar(&langValue, "lang", langValue, "output language (zh or en)")
 		fs.StringVar(&dlURL, "dl-url", dlURL, "download test URL")
 		fs.StringVar(&ulURL, "ul-url", ulURL, "upload test URL")
 		fs.StringVar(&latencyURL, "latency-url", latencyURL, "latency test URL")
@@ -87,10 +121,14 @@ func Load(args ...string) (*Config, error) {
 		if err := fs.Parse(args); err != nil {
 			return nil, err
 		}
+		i18n.Set(i18n.Resolve(langValue))
 		if help {
 			return nil, ErrHelp
 		}
 		if fs.NArg() > 0 {
+			if i18n.IsZH() {
+				return nil, fmt.Errorf("存在未识别参数: %s", strings.Join(fs.Args(), " "))
+			}
 			return nil, fmt.Errorf("unexpected argument(s): %s", strings.Join(fs.Args(), " "))
 		}
 	}
@@ -108,28 +146,31 @@ func Load(args ...string) (*Config, error) {
 	var err error
 	c.MaxBytes, err = ParseSize(c.Max)
 	if err != nil {
+		if i18n.IsZH() {
+			return nil, fmt.Errorf("MAX 值无效 %q: %w", c.Max, err)
+		}
 		return nil, fmt.Errorf("invalid MAX %q: %w", c.Max, err)
 	}
 	if c.MaxBytes <= 0 {
-		return nil, fmt.Errorf("MAX must be > 0")
+		return nil, errors.New(i18n.Text("MAX must be > 0", "MAX 必须大于 0"))
 	}
 	if c.Timeout <= 0 {
-		return nil, fmt.Errorf("TIMEOUT must be > 0")
+		return nil, errors.New(i18n.Text("TIMEOUT must be > 0", "TIMEOUT 必须大于 0"))
 	}
 	if c.Threads <= 0 {
-		return nil, fmt.Errorf("THREADS must be > 0")
+		return nil, errors.New(i18n.Text("THREADS must be > 0", "THREADS 必须大于 0"))
 	}
 	if c.LatencyCount <= 0 {
-		return nil, fmt.Errorf("LATENCY_COUNT must be > 0")
+		return nil, errors.New(i18n.Text("LATENCY_COUNT must be > 0", "LATENCY_COUNT 必须大于 0"))
 	}
 	if c.Timeout > 120 {
-		return nil, fmt.Errorf("TIMEOUT must be <= 120")
+		return nil, errors.New(i18n.Text("TIMEOUT must be <= 120", "TIMEOUT 必须小于等于 120"))
 	}
 	if c.Threads > 64 {
-		return nil, fmt.Errorf("THREADS must be <= 64")
+		return nil, errors.New(i18n.Text("THREADS must be <= 64", "THREADS 必须小于等于 64"))
 	}
 	if c.LatencyCount > 100 {
-		return nil, fmt.Errorf("LATENCY_COUNT must be <= 100")
+		return nil, errors.New(i18n.Text("LATENCY_COUNT must be <= 100", "LATENCY_COUNT 必须小于等于 100"))
 	}
 	for _, u := range []struct{ name, val string }{
 		{"DL_URL", c.DLURL},
@@ -137,6 +178,9 @@ func Load(args ...string) (*Config, error) {
 		{"LATENCY_URL", c.LatencyURL},
 	} {
 		if !strings.HasPrefix(u.val, "http://") && !strings.HasPrefix(u.val, "https://") {
+			if i18n.IsZH() {
+				return nil, fmt.Errorf("%s 必须以 http(s):// 开头", u.name)
+			}
 			return nil, fmt.Errorf("%s must start with http(s)://", u.name)
 		}
 	}
@@ -144,6 +188,10 @@ func Load(args ...string) (*Config, error) {
 }
 
 func (c *Config) Summary() string {
+	if i18n.IsZH() {
+		return fmt.Sprintf("超时=%ds  上限=%s  线程=%d  延迟采样=%d",
+			c.Timeout, c.Max, c.Threads, c.LatencyCount)
+	}
 	return fmt.Sprintf("timeout=%ds  max=%s  threads=%d  latency_count=%d",
 		c.Timeout, c.Max, c.Threads, c.LatencyCount)
 }

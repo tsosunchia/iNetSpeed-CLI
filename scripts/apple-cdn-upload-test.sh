@@ -11,10 +11,57 @@ if [ "$is_tty" -eq 1 ]; then
   c0="$(printf '\033[0m')"; b="$(printf '\033[1m')"
   g="$(printf '\033[32m')"; y="$(printf '\033[33m')"; d="$(printf '\033[2m')"; r="$(printf '\033[31m')"
 fi
+
+detect_lang() {
+  if [ -n "$SPEEDTEST_LANG" ]; then
+    _lang="$(printf "%s" "$SPEEDTEST_LANG" | tr '[:upper:]' '[:lower:]')"
+    case "$_lang" in
+      zh*) printf "zh" ;;
+      *) printf "en" ;;
+    esac
+    return
+  fi
+
+  for _lang in "$LC_ALL" "$LC_MESSAGES" "$LANGUAGE" "$LANG"; do
+    _lang="$(printf "%s" "$_lang" | tr '[:upper:]' '[:lower:]')"
+    case "$_lang" in
+      zh*) printf "zh"; return ;;
+    esac
+  done
+  printf "en"
+}
+
+LANG_MODE="$(detect_lang)"
+is_zh() { [ "$LANG_MODE" = "zh" ]; }
+
+msg() {
+  _m="$1"
+  if ! is_zh; then
+    printf "%s" "$_m"
+    return
+  fi
+  case "$_m" in
+    "Missing required command: "*) printf "缺少必需命令: %s" "${_m#Missing required command: }" ;;
+    "Install hint: "*) printf "安装提示: %s" "${_m#Install hint: }" ;;
+    "Environment check failed. Install required tools and rerun.") printf "环境检查失败。请先安装依赖后重试。" ;;
+    "Optional tool 'pv' not found.") printf "未找到可选工具 pv。" ;;
+    "iNetSpeed-CLI upload test") printf "iNetSpeed-CLI 上传测试" ;;
+    "URL: "*) printf "URL: %s" "${_m#URL: }" ;;
+    "Limit: "*) printf "上限: %s" "${_m#Limit: }" ;;
+    "Meter: "*) printf "进度方式: %s" "${_m#Meter: }" ;;
+    "pv not found. No live progress will be shown.") printf "未找到 pv，无法显示实时进度。" ;;
+    "Install it for real-time display:  apt install pv -y") printf "安装后可显示实时进度: apt install pv -y" ;;
+    "Testing in progress, please wait...") printf "测速进行中，请稍候..." ;;
+    "Could not retrieve transfer stats.") printf "无法获取传输统计信息。" ;;
+    "Done") printf "完成" ;;
+    *) printf "%s" "$_m" ;;
+  esac
+}
+
 line(){ printf "%s\n" "${d}------------------------------------------------------------${c0}" >&2; }
-info(){ printf "%s%s[+]%s %s\n" "$g" "$b" "$c0" "$*" >&2; }
-warn(){ printf "%s%s[!]%s %s\n" "$y" "$b" "$c0" "$*" >&2; }
-fatal(){ printf "%s%s[x]%s %s\n" "$r" "$b" "$c0" "$*" >&2; exit 1; }
+info(){ printf "%s%s[+]%s %s\n" "$g" "$b" "$c0" "$(msg "$*")" >&2; }
+warn(){ printf "%s%s[!]%s %s\n" "$y" "$b" "$c0" "$(msg "$*")" >&2; }
+fatal(){ printf "%s%s[x]%s %s\n" "$r" "$b" "$c0" "$(msg "$*")" >&2; exit 1; }
 
 pkg_install_hint() {
   _pkg="$1"
@@ -100,9 +147,13 @@ human_bytes() {
 }
 
 line
-info "Apple-CDN upload test"
+info "iNetSpeed-CLI upload test"
 info "URL: $URL"
-info "Limit: $SIZE / ${TIMEOUT}s (whichever first)"
+if is_zh; then
+  info "Limit: $SIZE / ${TIMEOUT}s（先到即止）"
+else
+  info "Limit: $SIZE / ${TIMEOUT}s (whichever first)"
+fi
 info "Meter: $( [ "$HAS_PV" -eq 1 ] && echo pv || echo curl )"
 line
 
@@ -146,7 +197,11 @@ if [ "$HAS_PV" -eq 1 ]; then
   mbps="$(awk -v b="$actual_bytes" -v t="$secs" 'BEGIN{if(t<=0)t=1; printf "%.0f",(b*8)/(t*1000000.0)}')"
   human="$(human_bytes "$actual_bytes")"
 
-  printf "\n%s%sResult:%s %s in %ss  →  %s Mbps\n" "$g" "$b" "$c0" "$human" "$secs" "$mbps" >&2
+  if is_zh; then
+    printf "\n%s%s结果:%s %s，耗时 %ss  →  %s Mbps\n" "$g" "$b" "$c0" "$human" "$secs" "$mbps" >&2
+  else
+    printf "\n%s%sResult:%s %s in %ss  →  %s Mbps\n" "$g" "$b" "$c0" "$human" "$secs" "$mbps" >&2
+  fi
 
 else
   tmpout="$(mktemp)"
@@ -171,7 +226,11 @@ else
   if [ -n "$sz" ] && [ -n "$t" ]; then
     mbps="$(awk -v b="$sz" -v t="$t" 'BEGIN{if(t<=0)t=1; printf "%.0f",(b*8)/(t*1000000.0)}')"
     human="$(human_bytes "${sz%.*}")"
-    printf "\n%s%sResult:%s %s in %ss  →  %s Mbps\n" "$g" "$b" "$c0" "$human" "$t" "$mbps" >&2
+    if is_zh; then
+      printf "\n%s%s结果:%s %s，耗时 %ss  →  %s Mbps\n" "$g" "$b" "$c0" "$human" "$t" "$mbps" >&2
+    else
+      printf "\n%s%sResult:%s %s in %ss  →  %s Mbps\n" "$g" "$b" "$c0" "$human" "$t" "$mbps" >&2
+    fi
   else
     warn "Could not retrieve transfer stats."
   fi

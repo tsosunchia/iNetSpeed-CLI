@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"testing"
+
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/i18n"
 )
 
 func TestParseSize(t *testing.T) {
@@ -269,5 +271,42 @@ func TestLoadUnexpectedArgs(t *testing.T) {
 	_, err := Load("extra")
 	if err == nil {
 		t.Fatal("Load() with unexpected args should fail")
+	}
+}
+
+func TestLoadLangFromEnv(t *testing.T) {
+	for _, k := range []string{"SPEEDTEST_LANG", "LC_ALL", "LC_MESSAGES", "LANGUAGE"} {
+		os.Unsetenv(k)
+	}
+	os.Setenv("LANG", "zh_CN.UTF-8")
+	defer os.Unsetenv("LANG")
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("Load() should succeed: %v", err)
+	}
+	if !i18n.IsZH() {
+		t.Fatal("expected zh locale from LANG")
+	}
+}
+
+func TestLoadLangFlagOverridesEnv(t *testing.T) {
+	os.Setenv("LANG", "zh_CN.UTF-8")
+	defer os.Unsetenv("LANG")
+
+	_, err := Load("--lang", "en")
+	if err != nil {
+		t.Fatalf("Load() should succeed: %v", err)
+	}
+	if i18n.IsZH() {
+		t.Fatal("expected --lang en to override zh env")
+	}
+
+	_, err = Load("--lang", "zh")
+	if err != nil {
+		t.Fatalf("Load() should succeed: %v", err)
+	}
+	if !i18n.IsZH() {
+		t.Fatal("expected --lang zh to set zh locale")
 	}
 }

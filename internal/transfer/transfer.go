@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/config"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/i18n"
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
 )
 
@@ -22,9 +23,9 @@ const (
 
 func (d Direction) String() string {
 	if d == Download {
-		return "Download"
+		return i18n.Text("Download", "下载")
 	}
-	return "Upload"
+	return i18n.Text("Upload", "上传")
 }
 
 type Result struct {
