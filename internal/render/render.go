@@ -21,6 +21,7 @@ const (
 	KindLine
 	KindProgress
 	KindFatal
+	KindSync
 )
 
 type Event struct {
@@ -28,6 +29,7 @@ type Event struct {
 	Label string
 	Value string
 	Time  time.Time
+	done  chan struct{}
 }
 
 type Bus struct {
@@ -43,6 +45,9 @@ func NewBus(r Renderer) *Bus {
 		defer b.wg.Done()
 		for ev := range b.ch {
 			r.Render(ev)
+			if ev.done != nil {
+				close(ev.done)
+			}
 		}
 	}()
 	return b
@@ -67,6 +72,11 @@ func (b *Bus) KV(k, v string)           { b.Send(Event{Kind: KindKV, Label: k, V
 func (b *Bus) Line()                    { b.Send(Event{Kind: KindLine}) }
 func (b *Bus) Fatal(v string)           { b.Send(Event{Kind: KindFatal, Value: v}) }
 func (b *Bus) Progress(label, v string) { b.Send(Event{Kind: KindProgress, Label: label, Value: v}) }
+func (b *Bus) Flush() {
+	done := make(chan struct{})
+	b.Send(Event{Kind: KindSync, done: done})
+	<-done
+}
 
 type Renderer interface {
 	Render(Event)
@@ -122,6 +132,8 @@ func (t *TTYRenderer) Render(ev Event) {
 		t.lastProg = line
 	case KindFatal:
 		fmt.Fprintf(t.w, "  %s%s[\u2717]%s %s\n", cRed, cBold, cReset, ev.Value)
+	case KindSync:
+		// no-op; used only as a synchronization barrier
 	}
 }
 
@@ -157,6 +169,8 @@ func (p *PlainRenderer) Render(ev Event) {
 		fmt.Fprintf(p.w, "  [%s] %s\n", ev.Label, ev.Value)
 	case KindFatal:
 		fmt.Fprintf(p.w, "  [X] %s\n", ev.Value)
+	case KindSync:
+		// no-op; used only as a synchronization barrier
 	}
 }
 

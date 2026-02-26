@@ -3,6 +3,7 @@ package render
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -87,6 +88,30 @@ func TestBusEventTimestamp(t *testing.T) {
 	}
 	if time.Since(lastEv.Time) > time.Second {
 		t.Error("event time too old")
+	}
+}
+
+func TestBusFlushWaitsForRender(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		seenMsg bool
+	)
+	r := &capRenderer{fn: func(ev Event) {
+		if ev.Kind == KindInfo && ev.Value == "ready" {
+			mu.Lock()
+			seenMsg = true
+			mu.Unlock()
+		}
+	}}
+	bus := NewBus(r)
+	bus.Info("ready")
+	bus.Flush()
+	bus.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !seenMsg {
+		t.Fatal("expected message to be rendered before Flush returned")
 	}
 }
 

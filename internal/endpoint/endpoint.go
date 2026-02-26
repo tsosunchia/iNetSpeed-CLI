@@ -71,6 +71,8 @@ func Choose(ctx context.Context, host string, bus *render.Bus, isTTY bool) Endpo
 
 	choice := 0
 	if len(endpoints) > 1 && isTTY {
+		// Ensure all queued endpoint lines are rendered before interactive prompt.
+		bus.Flush()
 		choice = promptChoice(len(endpoints), bus)
 	}
 	selected := endpoints[choice]
