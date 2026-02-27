@@ -75,37 +75,27 @@ read_input() {
   local __var_name="$1"
   local prompt_en="$2"
   local prompt_zh="$3"
-  local answer old_stty kbs read_ret
+  local answer prompt
+  local rl_ign_start=$'\001'
+  local rl_ign_end=$'\002'
 
-  printf '%b%s / %s%b ' "$C_CYAN" "$prompt_en" "$prompt_zh" "$C_RESET" >&2
   if [[ -r /dev/tty ]]; then
-    if has_cmd stty; then
-      old_stty="$(stty -g < /dev/tty 2>/dev/null || true)"
-      stty -echoctl < /dev/tty 2>/dev/null || true
-      if has_cmd tput; then
-        kbs="$(tput kbs 2>/dev/null || true)"
-      fi
-      case "$kbs" in
-        $'\b'|^H) stty erase '^H' < /dev/tty 2>/dev/null || true ;;
-        $'\177'|^?) stty erase '^?' < /dev/tty 2>/dev/null || true ;;
-      esac
-    fi
-
     bind '"\C-h": backward-delete-char' >/dev/null 2>&1 || true
     bind '"\C-?": backward-delete-char' >/dev/null 2>&1 || true
     bind '"\e[3~": delete-char' >/dev/null 2>&1 || true
 
-    if ! IFS= read -r -e answer < /dev/tty; then
-      read_ret=$?
-      if [[ -n "${old_stty:-}" ]]; then
-        stty "$old_stty" < /dev/tty 2>/dev/null || true
-      fi
-      return "$read_ret"
+    printf '%b%s / %s%b\n' "$C_CYAN" "$prompt_en" "$prompt_zh" "$C_RESET" >&2
+    if [[ -n "$C_CYAN" || -n "$C_RESET" ]]; then
+      prompt="${rl_ign_start}${C_CYAN}${rl_ign_end}> ${rl_ign_start}${C_RESET}${rl_ign_end}"
+    else
+      prompt="> "
     fi
-    if [[ -n "${old_stty:-}" ]]; then
-      stty "$old_stty" < /dev/tty 2>/dev/null || true
+
+    if ! IFS= read -r -e -p "$prompt" answer < /dev/tty; then
+      return 1
     fi
   else
+    printf '%s / %s\n> ' "$prompt_en" "$prompt_zh" >&2
     IFS= read -r answer || return 1
   fi
   answer="$(apply_backspaces "$answer")"
