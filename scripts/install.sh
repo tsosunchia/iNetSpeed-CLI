@@ -260,14 +260,18 @@ main() {
   log "Installed to ${target}" "安装完成：${target}"
   if [[ "$install_dir" == "$PWD" ]]; then
     run_hint="./${BINARY}"
-  else
+  elif path_has_dir "$install_dir"; then
     run_hint="${BINARY}"
+  else
+    run_hint="${target}"
   fi
   log "Run with: ${run_hint}" "运行命令：${run_hint}"
 
   log "Checking version output" "正在检查版本信息"
   if "$target" --version >/dev/null 2>&1; then
     "$target" --version
+  else
+    warn "Unable to detect version from installed binary." "无法从已安装二进制读取版本信息。"
   fi
 }
 
