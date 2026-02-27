@@ -8,6 +8,8 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'scripts/check.sh'
+      - 'scripts/apple-cdn-speedtest.sh'
+      - 'scripts/apple-cdn-speedtest_test.sh'
   pull_request:
     branches: [ main ]
     paths:
@@ -15,6 +17,8 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'scripts/check.sh'
+      - 'scripts/apple-cdn-speedtest.sh'
+      - 'scripts/apple-cdn-speedtest_test.sh'
 
 permissions:
   contents: read

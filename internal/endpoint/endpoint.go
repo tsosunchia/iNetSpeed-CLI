@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,10 +22,13 @@ import (
 )
 
 var ipv4Re = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+var ipv6Re = regexp.MustCompile(`(?i)(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}`)
 
 var (
-	cfDoHURLTemplate  = "https://cloudflare-dns.com/dns-query?name=%s&type=A"
-	aliDoHURLTemplate = "https://dns.alidns.com/resolve?name=%s&type=A&short=1"
+	cfDoHURLTemplate      = "https://cloudflare-dns.com/dns-query?name=%s&type=A"
+	cfDoHAAAAURLTemplate  = "https://cloudflare-dns.com/dns-query?name=%s&type=AAAA"
+	aliDoHURLTemplate     = "https://dns.alidns.com/resolve?name=%s&type=A&short=1"
+	aliDoHAAAAURLTemplate = "https://dns.alidns.com/resolve?name=%s&type=AAAA&short=1"
 
 	// dohTimeout is the per-provider timeout for DoH queries.
 	dohTimeout = 1 * time.Second
@@ -80,7 +84,7 @@ func Choose(ctx context.Context, host string, bus *render.Bus, isTTY bool) Endpo
 			bus.Warn(i18n.Text("Could not resolve endpoint IP, continue with default DNS.", "无法解析节点 IP，继续使用默认 DNS。"))
 			return Endpoint{}
 		}
-		bus.Warn(i18n.Text("Dual DoH returned no IPv4 endpoint, continue with default DNS.", "双 DoH 未返回 IPv4 节点，继续使用默认 DNS。"))
+		bus.Warn(i18n.Text("Dual DoH returned no endpoint, continue with default DNS.", "双 DoH 未返回节点，继续使用默认 DNS。"))
 		bus.Warn(i18n.Text("Could not resolve endpoint IP, continue with default DNS.", "无法解析节点 IP，继续使用默认 DNS。"))
 		return Endpoint{}
 	}
@@ -126,40 +130,56 @@ type dohResponse struct {
 	} `json:"Answer"`
 }
 
-// resolveDoHDual concurrently queries both CF and Ali DoH providers.
-// It returns the merged (CF first, Ali second, deduplicated) IP list and
-// each provider's timeout status.
+// resolveDoHDual concurrently queries both CF and Ali DoH providers for A
+// and AAAA records (four queries total). It returns the merged IP list in
+// the order CF-A, CF-AAAA, Ali-A, Ali-AAAA (deduplicated) and each
+// provider's timeout status. A provider is considered timed-out only when
+// both its A and AAAA queries timed out.
 func resolveDoHDual(ctx context.Context, host string) ([]string, bool, bool) {
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(4)
 
-	var cfRes, aliRes dohResult
+	var cfARes, cfAAAARes, aliARes, aliAAAARes dohResult
 
-	// Cloudflare DoH
+	// Cloudflare DoH A
 	go func() {
 		defer wg.Done()
-		cfRes = queryCFDoH(ctx, host)
+		cfARes = queryCFDoH(ctx, host, cfDoHURLTemplate)
 	}()
 
-	// AliDNS DoH
+	// Cloudflare DoH AAAA
 	go func() {
 		defer wg.Done()
-		aliRes = queryAliDoH(ctx, host)
+		cfAAAARes = queryCFDoH(ctx, host, cfDoHAAAAURLTemplate)
+	}()
+
+	// AliDNS DoH A
+	go func() {
+		defer wg.Done()
+		aliARes = queryAliDoH(ctx, host, aliDoHURLTemplate)
+	}()
+
+	// AliDNS DoH AAAA
+	go func() {
+		defer wg.Done()
+		aliAAAARes = queryAliDoH(ctx, host, aliDoHAAAAURLTemplate)
 	}()
 
 	wg.Wait()
 
-	// Merge: CF first, Ali second, deduplicated
-	merged := mergeIPs(cfRes.ips, aliRes.ips)
-	return merged, cfRes.timedOut, aliRes.timedOut
+	// Merge order: CF-A, CF-AAAA, Ali-A, Ali-AAAA (deduplicated)
+	merged := mergeIPs4(cfARes.ips, cfAAAARes.ips, aliARes.ips, aliAAAARes.ips)
+	cfTimedOut := cfARes.timedOut && cfAAAARes.timedOut
+	aliTimedOut := aliARes.timedOut && aliAAAARes.timedOut
+	return merged, cfTimedOut, aliTimedOut
 }
 
 // queryCFDoH queries Cloudflare DoH (application/dns-json format).
-func queryCFDoH(ctx context.Context, host string) dohResult {
+func queryCFDoH(ctx context.Context, host string, urlTemplate string) dohResult {
 	ctx2, cancel := context.WithTimeout(ctx, dohTimeout)
 	defer cancel()
 
-	reqURL := fmt.Sprintf(cfDoHURLTemplate, host)
+	reqURL := fmt.Sprintf(urlTemplate, host)
 	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return dohResult{err: err}
@@ -183,11 +203,11 @@ func queryCFDoH(ctx context.Context, host string) dohResult {
 }
 
 // queryAliDoH queries AliDNS DoH (short=1 format).
-func queryAliDoH(ctx context.Context, host string) dohResult {
+func queryAliDoH(ctx context.Context, host string, urlTemplate string) dohResult {
 	ctx2, cancel := context.WithTimeout(ctx, dohTimeout)
 	defer cancel()
 
-	reqURL := fmt.Sprintf(aliDoHURLTemplate, host)
+	reqURL := fmt.Sprintf(urlTemplate, host)
 	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return dohResult{err: err}
@@ -210,7 +230,8 @@ func queryAliDoH(ctx context.Context, host string) dohResult {
 }
 
 // extractIPsFromBody tries JSON structured parsing first, then falls back to
-// regex extraction. Returns deduplicated IPv4 addresses preserving order.
+// regex extraction. Returns deduplicated IP addresses (IPv4 and/or IPv6)
+// preserving order.
 func extractIPsFromBody(body []byte) []string {
 	// Try structured JSON first
 	var dr dohResponse
@@ -219,8 +240,7 @@ func extractIPsFromBody(body []byte) []string {
 		var out []string
 		for _, a := range dr.Answer {
 			ip := strings.TrimSpace(a.Data)
-			parsed := net.ParseIP(ip)
-			if parsed != nil && parsed.To4() != nil && !seen[ip] {
+			if net.ParseIP(ip) != nil && !seen[ip] {
 				seen[ip] = true
 				out = append(out, ip)
 			}
@@ -230,18 +250,30 @@ func extractIPsFromBody(body []byte) []string {
 		}
 	}
 
-	// Regex fallback
-	all := ipv4Re.FindAllString(string(body), -1)
+	// Regex fallback: find all IPv4 and IPv6 matches by position to
+	// preserve the order they appear in the response body.
+	s := string(body)
+	type match struct {
+		pos int
+		ip  string
+	}
+	var matches []match
+	for _, loc := range ipv4Re.FindAllStringIndex(s, -1) {
+		matches = append(matches, match{pos: loc[0], ip: s[loc[0]:loc[1]]})
+	}
+	for _, loc := range ipv6Re.FindAllStringIndex(s, -1) {
+		matches = append(matches, match{pos: loc[0], ip: s[loc[0]:loc[1]]})
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].pos < matches[j].pos })
 	seen := map[string]bool{}
 	var out []string
-	for _, ip := range all {
-		parsed := net.ParseIP(ip)
-		if parsed == nil || parsed.To4() == nil {
+	for _, m := range matches {
+		if net.ParseIP(m.ip) == nil {
 			continue
 		}
-		if !seen[ip] {
-			seen[ip] = true
-			out = append(out, ip)
+		if !seen[m.ip] {
+			seen[m.ip] = true
+			out = append(out, m.ip)
 		}
 	}
 	return out
@@ -252,8 +284,7 @@ func mergeIPs(first, second []string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, ip := range first {
-		parsed := net.ParseIP(ip)
-		if parsed == nil || parsed.To4() == nil {
+		if net.ParseIP(ip) == nil {
 			continue
 		}
 		if !seen[ip] {
@@ -262,13 +293,30 @@ func mergeIPs(first, second []string) []string {
 		}
 	}
 	for _, ip := range second {
-		parsed := net.ParseIP(ip)
-		if parsed == nil || parsed.To4() == nil {
+		if net.ParseIP(ip) == nil {
 			continue
 		}
 		if !seen[ip] {
 			seen[ip] = true
 			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// mergeIPs4 merges four IP slices in order and deduplicates.
+func mergeIPs4(a, b, c, d []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, list := range [][]string{a, b, c, d} {
+		for _, ip := range list {
+			if net.ParseIP(ip) == nil {
+				continue
+			}
+			if !seen[ip] {
+				seen[ip] = true
+				out = append(out, ip)
+			}
 		}
 	}
 	return out
@@ -329,11 +377,30 @@ func fetchIPDesc(ctx context.Context, ip string) string {
 	return i18n.Text("lookup failed", "查询失败")
 }
 
+// ipAPILangSuffix returns "&lang=zh-CN" when the UI language is Chinese,
+// otherwise an empty string (ip-api defaults to English).
+func ipAPILangSuffix() string {
+	if i18n.IsZH() {
+		return "&lang=zh-CN"
+	}
+	return ""
+}
+
+// buildIPAPIURL constructs an ip-api JSON endpoint URL with the given target
+// (empty string for self-lookup) and fields, appending the language suffix
+// when in Chinese mode.
+func buildIPAPIURL(target, fields string) string {
+	if target == "" {
+		return fmt.Sprintf("http://ip-api.com/json/?fields=%s%s", fields, ipAPILangSuffix())
+	}
+	return fmt.Sprintf("http://ip-api.com/json/%s?fields=%s%s", target, fields, ipAPILangSuffix())
+}
+
 func doFetchIPDesc(ctx context.Context, ip string) (string, error) {
 	ctx2, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 
-	reqURL := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,city,regionName,country,as,org", ip)
+	reqURL := buildIPAPIURL(ip, "status,city,regionName,country,as,org")
 	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return "", err
@@ -399,9 +466,9 @@ func doFetchInfo(ctx context.Context, target string) (IPInfo, error) {
 
 	var reqURL string
 	if target == "" {
-		reqURL = "http://ip-api.com/json/?fields=status,query,as,isp,city,regionName,country"
+		reqURL = buildIPAPIURL("", "status,query,as,isp,city,regionName,country")
 	} else {
-		reqURL = fmt.Sprintf("http://ip-api.com/json/%s?fields=status,query,as,isp,org,city,regionName,country", target)
+		reqURL = buildIPAPIURL(target, "status,query,as,isp,org,city,regionName,country")
 	}
 	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, reqURL, nil)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/i18n"
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
 )
 
@@ -330,20 +331,26 @@ func TestMergeIPs_CFFirst(t *testing.T) {
 	}
 }
 
-func useDoHTestConfig(t *testing.T, client *http.Client, timeout time.Duration, cfTemplate, aliTemplate string) {
+func useDoHTestConfig(t *testing.T, client *http.Client, timeout time.Duration, cfTemplate, cfAAAATemplate, aliTemplate, aliAAAATemplate string) {
 	oldCFTemplate := cfDoHURLTemplate
+	oldCFAAAATemplate := cfDoHAAAAURLTemplate
 	oldAliTemplate := aliDoHURLTemplate
+	oldAliAAAATemplate := aliDoHAAAAURLTemplate
 	oldHTTPClient := dohHTTPClient
 	oldTimeout := dohTimeout
 	t.Cleanup(func() {
 		cfDoHURLTemplate = oldCFTemplate
+		cfDoHAAAAURLTemplate = oldCFAAAATemplate
 		aliDoHURLTemplate = oldAliTemplate
+		aliDoHAAAAURLTemplate = oldAliAAAATemplate
 		dohHTTPClient = oldHTTPClient
 		dohTimeout = oldTimeout
 	})
 
 	cfDoHURLTemplate = cfTemplate
+	cfDoHAAAAURLTemplate = cfAAAATemplate
 	aliDoHURLTemplate = aliTemplate
+	aliDoHAAAAURLTemplate = aliAAAATemplate
 	dohHTTPClient = client
 	dohTimeout = timeout
 }
@@ -368,7 +375,9 @@ func TestResolveDoHDual_BothSuccess(t *testing.T) {
 		srv.Client(),
 		time.Second,
 		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/cf?name=%s&type=AAAA",
 		srv.URL+"/ali?name=%s&type=A&short=1",
+		srv.URL+"/ali?name=%s&type=AAAA&short=1",
 	)
 
 	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
@@ -403,7 +412,9 @@ func TestResolveDoHDual_CFTimeoutAliSuccess(t *testing.T) {
 		srv.Client(),
 		50*time.Millisecond,
 		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/cf?name=%s&type=AAAA",
 		srv.URL+"/ali?name=%s&type=A&short=1",
+		srv.URL+"/ali?name=%s&type=AAAA&short=1",
 	)
 
 	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
@@ -438,7 +449,9 @@ func TestResolveDoHDual_AliTimeoutCFSuccess(t *testing.T) {
 		srv.Client(),
 		50*time.Millisecond,
 		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/cf?name=%s&type=AAAA",
 		srv.URL+"/ali?name=%s&type=A&short=1",
+		srv.URL+"/ali?name=%s&type=AAAA&short=1",
 	)
 
 	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
@@ -466,7 +479,9 @@ func TestResolveDoHDual_BothTimeout(t *testing.T) {
 		srv.Client(),
 		50*time.Millisecond,
 		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/cf?name=%s&type=AAAA",
 		srv.URL+"/ali?name=%s&type=A&short=1",
+		srv.URL+"/ali?name=%s&type=AAAA&short=1",
 	)
 
 	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
@@ -488,7 +503,9 @@ func TestResolveDoHDual_BothNoIPsWithoutTimeout(t *testing.T) {
 		srv.Client(),
 		time.Second,
 		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/cf?name=%s&type=AAAA",
 		srv.URL+"/ali?name=%s&type=A&short=1",
+		srv.URL+"/ali?name=%s&type=AAAA&short=1",
 	)
 
 	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
@@ -656,5 +673,213 @@ func TestPromptChoiceNormalInput(t *testing.T) {
 	}
 	if ep.Desc != "desc-10.0.0.2" {
 		t.Errorf("expected Desc=desc-10.0.0.2, got %q", ep.Desc)
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  Dual-stack (A + AAAA) tests
+// ---------------------------------------------------------------------------
+
+func TestExtractIPsFromBody_IPv6JSON(t *testing.T) {
+	body := []byte(`{"Answer":[{"data":"2001:db8::1"},{"data":"2001:db8::2"},{"data":"2001:db8::1"}]}`)
+	ips := extractIPsFromBody(body)
+	if len(ips) != 2 || ips[0] != "2001:db8::1" || ips[1] != "2001:db8::2" {
+		t.Errorf("unexpected IPs: %v", ips)
+	}
+}
+
+func TestExtractIPsFromBody_MixedJSON(t *testing.T) {
+	body := []byte(`{"Answer":[{"data":"1.2.3.4"},{"data":"2001:db8::1"}]}`)
+	ips := extractIPsFromBody(body)
+	if len(ips) != 2 || ips[0] != "1.2.3.4" || ips[1] != "2001:db8::1" {
+		t.Errorf("unexpected IPs: %v", ips)
+	}
+}
+
+func TestExtractIPsFromBody_IPv6Regex(t *testing.T) {
+	body := []byte("2001:db8::1\n2001:db8::2\n")
+	ips := extractIPsFromBody(body)
+	want := []string{"2001:db8::1", "2001:db8::2"}
+	if !reflect.DeepEqual(ips, want) {
+		t.Errorf("unexpected IPs: %v, want %v", ips, want)
+	}
+}
+
+// TestExtractIPsFromBody_RegexMixedOrder verifies that the regex fallback
+// preserves the order addresses appear in the response body, even when
+// IPv4 and IPv6 are interleaved.
+func TestExtractIPsFromBody_RegexMixedOrder(t *testing.T) {
+	body := []byte("addr 2001:db8::1 then 1.1.1.1 then 2001:db8::2 then 2.2.2.2")
+	ips := extractIPsFromBody(body)
+	want := []string{"2001:db8::1", "1.1.1.1", "2001:db8::2", "2.2.2.2"}
+	if !reflect.DeepEqual(ips, want) {
+		t.Errorf("regex mixed order: got %v, want %v", ips, want)
+	}
+}
+
+func TestMergeIPs4(t *testing.T) {
+	a := []string{"1.1.1.1"}
+	b := []string{"2001:db8::1"}
+	c := []string{"2.2.2.2", "1.1.1.1"} // 1.1.1.1 is duplicate
+	d := []string{"2001:db8::2"}
+	merged := mergeIPs4(a, b, c, d)
+	want := []string{"1.1.1.1", "2001:db8::1", "2.2.2.2", "2001:db8::2"}
+	if !reflect.DeepEqual(merged, want) {
+		t.Errorf("mergeIPs4 = %v, want %v", merged, want)
+	}
+}
+
+func TestMergeIPs4_Empty(t *testing.T) {
+	merged := mergeIPs4(nil, nil, nil, nil)
+	if len(merged) != 0 {
+		t.Errorf("expected empty, got %v", merged)
+	}
+}
+
+func TestResolveDoHDual_DualStack(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		qtype := r.URL.Query().Get("type")
+		switch {
+		case r.URL.Path == "/cf" && qtype == "A":
+			w.Header().Set("Content-Type", "application/dns-json")
+			fmt.Fprint(w, `{"Answer":[{"data":"1.1.1.1"}]}`)
+		case r.URL.Path == "/cf" && qtype == "AAAA":
+			w.Header().Set("Content-Type", "application/dns-json")
+			fmt.Fprint(w, `{"Answer":[{"data":"2001:db8::cf"}]}`)
+		case r.URL.Path == "/ali" && qtype == "A":
+			fmt.Fprint(w, `{"Answer":[{"data":"2.2.2.2"}]}`)
+		case r.URL.Path == "/ali" && qtype == "AAAA":
+			fmt.Fprint(w, `{"Answer":[{"data":"2001:db8::ace"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	useDoHTestConfig(
+		t,
+		srv.Client(),
+		time.Second,
+		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/cf?name=%s&type=AAAA",
+		srv.URL+"/ali?name=%s&type=A&short=1",
+		srv.URL+"/ali?name=%s&type=AAAA&short=1",
+	)
+
+	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
+	// Order: CF-A, CF-AAAA, Ali-A, Ali-AAAA
+	want := []string{"1.1.1.1", "2001:db8::cf", "2.2.2.2", "2001:db8::ace"}
+	if !reflect.DeepEqual(ips, want) {
+		t.Fatalf("resolveDoHDual IPs = %v, want %v", ips, want)
+	}
+	if cfTimedOut || aliTimedOut {
+		t.Fatalf("unexpected timeout flags: cf=%v ali=%v", cfTimedOut, aliTimedOut)
+	}
+}
+
+func TestResolveDoHDual_PartialTimeout(t *testing.T) {
+	// CF-A succeeds, CF-AAAA times out, Ali-A times out, Ali-AAAA succeeds
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		qtype := r.URL.Query().Get("type")
+		switch {
+		case r.URL.Path == "/cf" && qtype == "A":
+			fmt.Fprint(w, `{"Answer":[{"data":"1.1.1.1"}]}`)
+		case r.URL.Path == "/cf" && qtype == "AAAA":
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			fmt.Fprint(w, `{"Answer":[{"data":"2001:db8::cf"}]}`)
+		case r.URL.Path == "/ali" && qtype == "A":
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			fmt.Fprint(w, `{"Answer":[{"data":"2.2.2.2"}]}`)
+		case r.URL.Path == "/ali" && qtype == "AAAA":
+			fmt.Fprint(w, `{"Answer":[{"data":"2001:db8::ace"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	useDoHTestConfig(
+		t,
+		srv.Client(),
+		50*time.Millisecond,
+		srv.URL+"/cf?name=%s&type=A",
+		srv.URL+"/cf?name=%s&type=AAAA",
+		srv.URL+"/ali?name=%s&type=A&short=1",
+		srv.URL+"/ali?name=%s&type=AAAA&short=1",
+	)
+
+	ips, cfTimedOut, aliTimedOut := resolveDoHDual(context.Background(), "example.com")
+	// CF: A succeeded, AAAA timed out → cfTimedOut = false (not both timed out)
+	// Ali: A timed out, AAAA succeeded → aliTimedOut = false
+	want := []string{"1.1.1.1", "2001:db8::ace"}
+	if !reflect.DeepEqual(ips, want) {
+		t.Fatalf("IPs = %v, want %v", ips, want)
+	}
+	if cfTimedOut || aliTimedOut {
+		t.Fatalf("unexpected timeout: cf=%v ali=%v", cfTimedOut, aliTimedOut)
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  buildIPAPIURL / ipAPILangSuffix tests
+// ---------------------------------------------------------------------------
+
+func TestBuildIPAPIURL(t *testing.T) {
+	oldLang := i18n.Lang()
+	defer i18n.Set(oldLang)
+
+	// English mode
+	i18n.Set("en")
+	url := buildIPAPIURL("1.2.3.4", "status,city")
+	want := "http://ip-api.com/json/1.2.3.4?fields=status,city"
+	if url != want {
+		t.Errorf("en mode: got %q, want %q", url, want)
+	}
+	if strings.Contains(url, "lang=") {
+		t.Errorf("English mode should not contain lang param: %s", url)
+	}
+
+	// Chinese mode
+	i18n.Set("zh")
+	url = buildIPAPIURL("1.2.3.4", "status,city")
+	want = "http://ip-api.com/json/1.2.3.4?fields=status,city&lang=zh-CN"
+	if url != want {
+		t.Errorf("zh mode: got %q, want %q", url, want)
+	}
+
+	// Self-lookup (empty target) in Chinese
+	url = buildIPAPIURL("", "status,query")
+	want = "http://ip-api.com/json/?fields=status,query&lang=zh-CN"
+	if url != want {
+		t.Errorf("zh self-lookup: got %q, want %q", url, want)
+	}
+
+	// Self-lookup in English
+	i18n.Set("en")
+	url = buildIPAPIURL("", "status,query")
+	want = "http://ip-api.com/json/?fields=status,query"
+	if url != want {
+		t.Errorf("en self-lookup: got %q, want %q", url, want)
+	}
+}
+
+func TestIPAPILangSuffix(t *testing.T) {
+	oldLang := i18n.Lang()
+	defer i18n.Set(oldLang)
+
+	i18n.Set("en")
+	if s := ipAPILangSuffix(); s != "" {
+		t.Errorf("en: expected empty, got %q", s)
+	}
+
+	i18n.Set("zh")
+	if s := ipAPILangSuffix(); s != "&lang=zh-CN" {
+		t.Errorf("zh: expected &lang=zh-CN, got %q", s)
 	}
 }

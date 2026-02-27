@@ -75,10 +75,8 @@ msg() {
     "Endpoint Selection") printf "节点选择" ;;
     "Could not parse host from DL_URL. Skip endpoint selection.") printf "无法从 DL_URL 解析主机，跳过节点选择。" ;;
     "Host: "*) printf "主机: %s" "${_m#Host: }" ;;
-    "DoH (CF): "*) printf "DoH (CF): %s" "${_m#DoH (CF): }" ;;
-    "DoH (Ali): "*) printf "DoH (Ali): %s" "${_m#DoH (Ali): }" ;;
     "Dual DoH (CF + Ali) both timed out. Fallback to system DNS.") printf "双 DoH（CF + Ali）均超时，回退到系统 DNS。" ;;
-    "Dual DoH returned no IPv4 endpoint, continue with default DNS.") printf "双 DoH 未返回 IPv4 节点，继续使用默认 DNS。" ;;
+    "Dual DoH returned no endpoint, continue with default DNS.") printf "双 DoH 未返回节点，继续使用默认 DNS。" ;;
     "Selected endpoint: "*) printf "已选择节点: %s" "${_m#Selected endpoint: }" ;;
     "Could not resolve endpoint IP, continue with default DNS.") printf "无法解析节点 IP，继续使用默认 DNS。" ;;
     "Available endpoints:") printf "可用节点:" ;;
@@ -257,8 +255,25 @@ apple_curl() {
   fi
 }
 
-# ────────────────────────────────────────────────────────────
-#  ENDPOINT SELECTION  (CF DoH + AliDNS DoH concurrent)
+# ── ip-api helpers ───────────────────────────────────────────
+ip_api_lang_suffix() {
+  if is_zh; then
+    printf "&lang=zh-CN"
+  fi
+}
+
+ip_api_url() {
+  _target="$1"
+  _fields="$2"
+  if [ -z "$_target" ]; then
+    printf "http://ip-api.com/json/?fields=%s%s" "$_fields" "$(ip_api_lang_suffix)"
+  else
+    printf "http://ip-api.com/json/%s?fields=%s%s" "$_target" "$_fields" "$(ip_api_lang_suffix)"
+  fi
+}
+
+# ────────────────────────────────────────────────────────────────
+#  ENDPOINT SELECTION  (CF DoH + AliDNS DoH concurrent, A + AAAA)
 # ────────────────────────────────────────────────────────────
 choose_endpoint() {
   hdr "Endpoint Selection"
@@ -270,67 +285,104 @@ choose_endpoint() {
   fi
 
   info "Host: $CDN_HOST"
-  info "DoH (CF): https://cloudflare-dns.com/dns-query?name=${CDN_HOST}&type=A"
-  info "DoH (Ali): https://dns.alidns.com/resolve?name=${CDN_HOST}&type=A"
 
-  # Temp files for concurrent results
-  _cf_file="$(mktemp)"
-  _ali_file="$(mktemp)"
-  _cf_rc_file="$(mktemp)"
-  _ali_rc_file="$(mktemp)"
+  # Temp files for 4 concurrent DoH queries (A + AAAA × CF + Ali)
+  _cf_a_file="$(mktemp)";    _cf_a_rc="$(mktemp)"
+  _cf_aaaa_file="$(mktemp)"; _cf_aaaa_rc="$(mktemp)"
+  _ali_a_file="$(mktemp)";   _ali_a_rc="$(mktemp)"
+  _ali_aaaa_file="$(mktemp)";_ali_aaaa_rc="$(mktemp)"
 
-  # Concurrent CF DoH query (background)
+  # CF DoH A (background)
   (
     curl -sS --max-time 1 \
       -H 'accept: application/dns-json' \
       "https://cloudflare-dns.com/dns-query?name=${CDN_HOST}&type=A" \
-      > "$_cf_file" 2>/dev/null
-    echo "$?" > "$_cf_rc_file"
+      > "$_cf_a_file" 2>/dev/null
+    echo "$?" > "$_cf_a_rc"
   ) &
-  _cf_pid=$!
+  _cf_a_pid=$!
 
-  # Concurrent Ali DoH query (background)
+  # CF DoH AAAA (background)
+  (
+    curl -sS --max-time 1 \
+      -H 'accept: application/dns-json' \
+      "https://cloudflare-dns.com/dns-query?name=${CDN_HOST}&type=AAAA" \
+      > "$_cf_aaaa_file" 2>/dev/null
+    echo "$?" > "$_cf_aaaa_rc"
+  ) &
+  _cf_aaaa_pid=$!
+
+  # Ali DoH A (background)
   (
     curl -sS --max-time 1 \
       "https://dns.alidns.com/resolve?name=${CDN_HOST}&type=A&short=1" \
-      > "$_ali_file" 2>/dev/null
-    echo "$?" > "$_ali_rc_file"
+      > "$_ali_a_file" 2>/dev/null
+    echo "$?" > "$_ali_a_rc"
   ) &
-  _ali_pid=$!
+  _ali_a_pid=$!
 
-  # Wait for both
-  wait "$_cf_pid" 2>/dev/null || true
-  wait "$_ali_pid" 2>/dev/null || true
+  # Ali DoH AAAA (background)
+  (
+    curl -sS --max-time 1 \
+      "https://dns.alidns.com/resolve?name=${CDN_HOST}&type=AAAA&short=1" \
+      > "$_ali_aaaa_file" 2>/dev/null
+    echo "$?" > "$_ali_aaaa_rc"
+  ) &
+  _ali_aaaa_pid=$!
 
-  _cf_rc="$(cat "$_cf_rc_file" 2>/dev/null)"; [ -z "$_cf_rc" ] && _cf_rc=1
-  _ali_rc="$(cat "$_ali_rc_file" 2>/dev/null)"; [ -z "$_ali_rc" ] && _ali_rc=1
+  # Wait for all 4
+  wait "$_cf_a_pid" 2>/dev/null || true
+  wait "$_cf_aaaa_pid" 2>/dev/null || true
+  wait "$_ali_a_pid" 2>/dev/null || true
+  wait "$_ali_aaaa_pid" 2>/dev/null || true
 
-  # Determine timeout status (curl exit code 28 = timeout)
-  _cf_timeout=0; [ "$_cf_rc" -eq 28 ] && _cf_timeout=1
-  _ali_timeout=0; [ "$_ali_rc" -eq 28 ] && _ali_timeout=1
+  _cf_a_exit="$(cat "$_cf_a_rc" 2>/dev/null)";       [ -z "$_cf_a_exit" ] && _cf_a_exit=1
+  _cf_aaaa_exit="$(cat "$_cf_aaaa_rc" 2>/dev/null)";  [ -z "$_cf_aaaa_exit" ] && _cf_aaaa_exit=1
+  _ali_a_exit="$(cat "$_ali_a_rc" 2>/dev/null)";      [ -z "$_ali_a_exit" ] && _ali_a_exit=1
+  _ali_aaaa_exit="$(cat "$_ali_aaaa_rc" 2>/dev/null)"; [ -z "$_ali_aaaa_exit" ] && _ali_aaaa_exit=1
 
-  # Extract IPs from CF result
-  _cf_ips=""
-  if [ "$_cf_timeout" -eq 0 ] && [ -s "$_cf_file" ]; then
-    _cf_ips="$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$_cf_file" | awk '!seen[$0]++')"
+  # Timeout flags (curl exit code 28 = timeout)
+  _cf_a_to=0;    [ "$_cf_a_exit" -eq 28 ] && _cf_a_to=1
+  _cf_aaaa_to=0; [ "$_cf_aaaa_exit" -eq 28 ] && _cf_aaaa_to=1
+  _ali_a_to=0;   [ "$_ali_a_exit" -eq 28 ] && _ali_a_to=1
+  _ali_aaaa_to=0;[ "$_ali_aaaa_exit" -eq 28 ] && _ali_aaaa_to=1
+
+  # Provider-level timeout: both A and AAAA must timeout
+  _cf_timeout=0;  [ "$_cf_a_to" -eq 1 ] && [ "$_cf_aaaa_to" -eq 1 ] && _cf_timeout=1
+  _ali_timeout=0; [ "$_ali_a_to" -eq 1 ] && [ "$_ali_aaaa_to" -eq 1 ] && _ali_timeout=1
+
+  # Extract IPs: IPv4 from A results, IPv6 from AAAA results
+  _cf_a_ips=""
+  if [ "$_cf_a_to" -eq 0 ] && [ -s "$_cf_a_file" ]; then
+    _cf_a_ips="$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$_cf_a_file" | awk '!seen[$0]++')"
   fi
 
-  # Extract IPs from Ali result
-  _ali_ips=""
-  if [ "$_ali_timeout" -eq 0 ] && [ -s "$_ali_file" ]; then
-    _ali_ips="$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$_ali_file" | awk '!seen[$0]++')"
+  _cf_aaaa_ips=""
+  if [ "$_cf_aaaa_to" -eq 0 ] && [ -s "$_cf_aaaa_file" ]; then
+    _cf_aaaa_ips="$(grep -oiE '[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,7}' "$_cf_aaaa_file" | awk '!seen[$0]++')"
   fi
 
-  rm -f "$_cf_file" "$_ali_file" "$_cf_rc_file" "$_ali_rc_file"
+  _ali_a_ips=""
+  if [ "$_ali_a_to" -eq 0 ] && [ -s "$_ali_a_file" ]; then
+    _ali_a_ips="$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$_ali_a_file" | awk '!seen[$0]++')"
+  fi
 
-  # Merge: CF first, Ali second, deduplicated
+  _ali_aaaa_ips=""
+  if [ "$_ali_aaaa_to" -eq 0 ] && [ -s "$_ali_aaaa_file" ]; then
+    _ali_aaaa_ips="$(grep -oiE '[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,7}' "$_ali_aaaa_file" | awk '!seen[$0]++')"
+  fi
+
+  rm -f "$_cf_a_file" "$_cf_aaaa_file" "$_ali_a_file" "$_ali_aaaa_file" \
+        "$_cf_a_rc" "$_cf_aaaa_rc" "$_ali_a_rc" "$_ali_aaaa_rc"
+
+  # Merge order: CF-A, CF-AAAA, Ali-A, Ali-AAAA (deduplicated)
   _ips=""
-  if [ -n "$_cf_ips" ] && [ -n "$_ali_ips" ]; then
-    _ips="$(printf "%s\n%s\n" "$_cf_ips" "$_ali_ips" | awk '!seen[$0]++')"
-  elif [ -n "$_cf_ips" ]; then
-    _ips="$_cf_ips"
-  elif [ -n "$_ali_ips" ]; then
-    _ips="$_ali_ips"
+  for _part in "$_cf_a_ips" "$_cf_aaaa_ips" "$_ali_a_ips" "$_ali_aaaa_ips"; do
+    [ -n "$_part" ] && _ips="${_ips:+${_ips}
+}${_part}"
+  done
+  if [ -n "$_ips" ]; then
+    _ips="$(printf "%s\n" "$_ips" | awk 'NF && !seen[$0]++')"
   fi
 
   if [ -z "$_ips" ]; then
@@ -340,13 +392,17 @@ choose_endpoint() {
       _fallback_ip="$(resolve_ip "$CDN_HOST")"
       if [ -n "$_fallback_ip" ]; then
         SELECTED_ENDPOINT_IP="$_fallback_ip"
-        SELECTED_ENDPOINT_DESC="system DNS fallback"
+        if is_zh; then
+          SELECTED_ENDPOINT_DESC="系统 DNS 回退"
+        else
+          SELECTED_ENDPOINT_DESC="system DNS fallback"
+        fi
         info "Selected endpoint: ${SELECTED_ENDPOINT_IP} (${SELECTED_ENDPOINT_DESC})"
       else
         warn "Could not resolve endpoint IP, continue with default DNS."
       fi
     else
-      warn "Dual DoH returned no IPv4 endpoint, continue with default DNS."
+      warn "Dual DoH returned no endpoint, continue with default DNS."
       warn "Could not resolve endpoint IP, continue with default DNS."
     fi
     return
@@ -362,7 +418,7 @@ choose_endpoint() {
     [ -z "$_ip" ] && continue
 
     _meta="$(curl -sS --max-time 4 \
-      "http://ip-api.com/json/${_ip}?fields=status,message,city,regionName,country,as,org" \
+      "$(ip_api_url "$_ip" "status,message,city,regionName,country,as,org")" \
       2>/dev/null || true)"
     _status="$(echo "$_meta" | json_val "status")"
     _city="$(echo "$_meta" | json_val "city")"
@@ -376,9 +432,11 @@ choose_endpoint() {
       _loc="${_city}"
       [ -n "$_region" ] && [ "$_region" != "$_city" ] && _loc="${_loc}, ${_region}"
       [ -n "$_country" ] && _loc="${_loc}, ${_country}"
-      [ -z "$_loc" ] && _loc="unknown location"
+      if [ -z "$_loc" ]; then
+        if is_zh; then _loc="未知位置"; else _loc="unknown location"; fi
+      fi
     else
-      _loc="lookup failed"
+      if is_zh; then _loc="查询失败"; else _loc="lookup failed"; fi
     fi
 
     [ -z "$_as" ] && _as="$_org"
@@ -446,7 +504,7 @@ gather_info() {
   hdr "Connection Information"
 
   client_json="$(curl -sS --max-time 5 \
-    "http://ip-api.com/json/?fields=query,as,isp,city,regionName,country" 2>/dev/null || true)"
+    "$(ip_api_url "" "query,as,isp,city,regionName,country")" 2>/dev/null || true)"
   if [ -n "$client_json" ]; then
     client_ip="$(echo "$client_json"      | json_val "query")"
     client_as="$(echo "$client_json"      | json_val "as")"
@@ -472,7 +530,7 @@ gather_info() {
 
   if [ -n "$server_ip" ]; then
     srv_json="$(curl -sS --max-time 5 \
-      "http://ip-api.com/json/${server_ip}?fields=query,as,org,city,country" 2>/dev/null || true)"
+      "$(ip_api_url "$server_ip" "query,as,org,city,country")" 2>/dev/null || true)"
     server_as="$(echo "$srv_json"      | json_val "as")"
     server_org="$(echo "$srv_json"     | json_val "org")"
     server_city="$(echo "$srv_json"    | json_val "city")"
@@ -760,6 +818,11 @@ run_transfer_test() {
     info "Loaded latency: ${_ll_med} ms  (jitter ${_ll_jit} ms)"
   fi
 }
+
+# When sourced for testing, stop here — do not execute main.
+if [ "${SPEEDTEST_SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 # ============================================================
 #  MAIN

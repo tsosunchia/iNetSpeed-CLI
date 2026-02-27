@@ -22,5 +22,9 @@ echo "=== go test -race ==="
 go test -race ./... -count=1
 echo "  OK"
 
+echo "=== shell tests ==="
+bash "$(dirname "$0")/apple-cdn-speedtest_test.sh"
+echo "  OK"
+
 echo ""
 echo "All checks passed."

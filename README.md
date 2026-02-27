@@ -52,7 +52,7 @@ curl -sL nxtrace.org/speedtest | bash
 | 只测上传 | `scripts/apple-cdn-upload-test.sh` |
 | 构建多平台二进制 | `scripts/build.sh`（输出到 `dist/`） |
 | 一键安装 Go 版（Linux） | `scripts/install.sh` |
-| 本地质量检查（格式 + vet + test + race） | `scripts/check.sh` |
+| 本地质量检查（格式 + vet + test + race + shell） | `scripts/check.sh` |
 
 ## 常见使用场景
 
@@ -174,10 +174,10 @@ curl -sL nxtrace.org/speedtest_install | bash
 
 ### 节点选择逻辑
 
-1. 并发查询 Cloudflare DoH 和 AliDNS DoH 获取 `mensura.cdn-apple.com` 的 A 记录（各 1 秒超时）。
-2. 合并结果：CF 在前，Ali 在后，去重后作为候选节点列表。
-3. 仅当两路 DoH **都超时** 时，才触发 system DNS fallback。
-4. 用 ip-api 查询每个 IP 的地域 / ASN 信息。
+1. 并发查询 Cloudflare DoH 和 AliDNS DoH 获取 `mensura.cdn-apple.com` 的 **A + AAAA** 记录（4 路并发：CF-A、CF-AAAA、Ali-A、Ali-AAAA，各 1 秒超时）。
+2. 合并结果：按 CF-A → CF-AAAA → Ali-A → Ali-AAAA 顺序拼接，全局去重后作为候选节点列表（同时支持 IPv4 和 IPv6）。
+3. 仅当某一提供商的 A **和** AAAA 查询都超时时，该提供商才被视为超时；仅当两路都超时时，才触发 system DNS fallback。
+4. 用 ip-api 查询每个 IP 的地域 / ASN 信息（中文环境自动附加 `lang=zh-CN` 参数，获取中文地理信息）。
 5. 交互终端下可手动选择节点；非交互环境默认选择第 1 个。
 6. 选中后通过 HTTP 客户端 DialContext 固定连接目标（等效于 `curl --resolve`）。
 
@@ -188,7 +188,7 @@ cmd/speedtest/main.go       入口，信号处理
 internal/
   config/    配置加载 & 校验 & 单位解析
   netx/      HTTP/2 客户端工厂 + 端点固定（--resolve 等效）
-  endpoint/  双 DoH（CF+Ali）解析 + ip-api 地理信息 + 节点选择
+  endpoint/  双 DoH（CF+Ali）A+AAAA 双栈解析 + ip-api 地理信息（自动中文） + 节点选择
   latency/   空载/负载延迟采样 & 统计
   transfer/  下载/上传传输（单/多线程、双限制）
   runner/    测试流程编排
@@ -198,9 +198,10 @@ internal/
 ### 开发与质量检查
 
 ```bash
-go test ./... -count=1        # 全部测试
+go test ./... -count=1        # 全部 Go 测试
 go test -race ./... -count=1  # 含竞态检测
-bash scripts/check.sh         # 本地完整检查（格式 + vet + test + race）
+bash scripts/apple-cdn-speedtest_test.sh  # Shell 单元测试
+bash scripts/check.sh         # 本地完整检查（格式 + vet + test + race + shell tests）
 ```
 
 ### CI / CD
@@ -295,10 +296,10 @@ TIMEOUT=5 MAX=1G THREADS=8 LATENCY_COUNT=10 sh scripts/apple-cdn-speedtest.sh
 
 ### 节点选择逻辑（Shell 版）
 
-1. 并发查询 Cloudflare DoH 和 AliDNS DoH 获取 `mensura.cdn-apple.com` 的 A 记录（各 1 秒超时）。
-2. 合并结果：CF 在前，Ali 在后，去重后作为候选节点列表。
-3. 仅当两路 DoH **都超时** 时，才触发 system DNS fallback。
-4. 用 ip-api 查询每个 IP 的地域/ASN 信息。
+1. 并发查询 Cloudflare DoH 和 AliDNS DoH 获取 `mensura.cdn-apple.com` 的 **A + AAAA** 记录（4 路并发：CF-A、CF-AAAA、Ali-A、Ali-AAAA，各 1 秒超时）。
+2. 合并结果：按 CF-A → CF-AAAA → Ali-A → Ali-AAAA 顺序拼接，全局去重后作为候选节点列表（同时支持 IPv4 和 IPv6）。
+3. 仅当某一提供商的 A **和** AAAA 查询都超时时，该提供商才被视为超时；仅当两路都超时时，才触发 system DNS fallback。
+4. 用 ip-api 查询每个 IP 的地域/ASN 信息（中文环境自动附加 `lang=zh-CN` 参数，获取中文地理信息）。
 5. 交互终端下可手动选择节点；非交互环境默认选择第 1 个。
 6. 选中后通过 `curl --resolve host:443:IP` 固定后续测试连接目标。
 
