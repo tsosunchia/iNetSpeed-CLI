@@ -13,6 +13,12 @@
 curl -fsSL https://raw.githubusercontent.com/tsosunchia/iNetSpeed-CLI/main/scripts/install.sh | bash
 ```
 
+默认安装位置：
+
+- 普通用户优先安装到 `~/.local/bin`；如果 `~/bin` 已在 `PATH` 中，则优先复用 `~/bin`
+- `root` 安装到 `/usr/local/bin`
+- 若用户目录不在 `PATH`，安装脚本会自动追加到当前 shell 的 rc 文件
+
 也可以从 Releases 下载归档包：
 
 - [Latest Release](https://github.com/tsosunchia/iNetSpeed-CLI/releases/latest)
@@ -26,6 +32,12 @@ irm https://raw.githubusercontent.com/tsosunchia/iNetSpeed-CLI/main/scripts/inst
 ```
 
 或直接下载 `speedtest-windows-amd64.zip`。
+
+默认安装位置：
+
+- 普通用户安装到 `%LOCALAPPDATA%\Programs\speedtest`
+- 管理员安装到 `%ProgramFiles%\speedtest`
+- 安装脚本会把目录写入用户级或机器级 `PATH`
 
 ## Legacy Shell 脚本
 

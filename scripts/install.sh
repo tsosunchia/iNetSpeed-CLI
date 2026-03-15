@@ -85,6 +85,14 @@ choose_install_dir() {
     printf '%s\n' "/usr/local/bin"
     return
   fi
+  if path_has_dir "${HOME}/.local/bin"; then
+    printf '%s\n' "${HOME}/.local/bin"
+    return
+  fi
+  if path_has_dir "${HOME}/bin"; then
+    printf '%s\n' "${HOME}/bin"
+    return
+  fi
   printf '%s\n' "${HOME}/.local/bin"
 }
 
@@ -125,13 +133,59 @@ cleanup() {
   fi
 }
 
+choose_shell_rc() {
+  case "${SHELL##*/}" in
+    zsh)
+      printf '%s\n' "${HOME}/.zshrc"
+      ;;
+    bash)
+      if [[ -f "${HOME}/.bashrc" || ! -f "${HOME}/.bash_profile" ]]; then
+        printf '%s\n' "${HOME}/.bashrc"
+      else
+        printf '%s\n' "${HOME}/.bash_profile"
+      fi
+      ;;
+    *)
+      printf '%s\n' "${HOME}/.profile"
+      ;;
+  esac
+}
+
+ensure_user_path() {
+  local dir="$1"
+  local rc_file export_line
+
+  if path_has_dir "$dir"; then
+    return 0
+  fi
+  if [[ -n "${INSTALL_DIR:-}" || "$(id -u)" -eq 0 ]]; then
+    warn "install dir is not in PATH: ${dir}"
+    return 1
+  fi
+
+  rc_file="$(choose_shell_rc)"
+  export_line="export PATH=\"${dir}:\$PATH\""
+  mkdir -p "$(dirname "${rc_file}")"
+  touch "${rc_file}"
+  if ! grep -Fqx "${export_line}" "${rc_file}"; then
+    {
+      printf '\n'
+      printf '# Added by iNetSpeed-CLI installer\n'
+      printf '%s\n' "${export_line}"
+    } >> "${rc_file}"
+    warn "added ${dir} to PATH in ${rc_file}; open a new shell to use it."
+  fi
+  export PATH="${dir}:${PATH:-}"
+  return 0
+}
+
 main() {
   local platform os arch ext asset archive_path sum_path tmpdir install_dir target extracted run_hint
   IFS='/' read -r os arch ext <<< "$(detect_platform)"
   asset="${BINARY}-${os}-${arch}.${ext}"
 
   tmpdir="$(mktemp -d)"
-  trap 'cleanup "${tmpdir:-}"' EXIT
+  trap "cleanup '${tmpdir}'" EXIT
   archive_path="${tmpdir}/${asset}"
   sum_path="${tmpdir}/checksums-sha256.txt"
 
@@ -158,9 +212,7 @@ main() {
   chmod +x "${target}"
 
   log "Installed to ${target}"
-  if ! path_has_dir "${install_dir}"; then
-    warn "install dir is not in PATH: ${install_dir}"
-  fi
+  ensure_user_path "${install_dir}" || true
 
   if [[ "${install_dir}" == "${PWD}" ]]; then
     run_hint="./${BINARY}"
