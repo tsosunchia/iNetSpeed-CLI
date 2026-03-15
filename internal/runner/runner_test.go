@@ -194,9 +194,15 @@ func TestRunResultJSONGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error: %v", err)
 	}
-	if string(got) != strings.TrimSpace(string(want)) {
-		t.Fatalf("golden mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	gotText := normalizeGolden(got)
+	wantText := normalizeGolden(want)
+	if gotText != wantText {
+		t.Fatalf("golden mismatch\n--- got ---\n%s\n--- want ---\n%s", gotText, wantText)
 	}
+}
+
+func normalizeGolden(data []byte) string {
+	return strings.ReplaceAll(strings.TrimSpace(string(data)), "\r\n", "\n")
 }
 
 func mockRunnerServer() *httptest.Server {

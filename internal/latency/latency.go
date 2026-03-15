@@ -107,7 +107,16 @@ func probe(ctx context.Context, client *http.Client, url string) float64 {
 			break
 		}
 	}
-	return float64(time.Since(start).Microseconds()) / 1000.0
+
+	// Windows localhost probes can round down to 0ms if we truncate too early.
+	elapsedMs := float64(time.Since(start).Nanoseconds()) / float64(time.Millisecond)
+	if elapsedMs <= 0 {
+		return 0.01
+	}
+	if elapsedMs < 0.01 {
+		return 0.01
+	}
+	return elapsedMs
 }
 
 func Compute(samples []float64) Stats {
