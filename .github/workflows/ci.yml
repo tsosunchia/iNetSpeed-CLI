@@ -26,6 +26,7 @@ jobs:
           cache: true
 
       - name: gofmt
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           files="$(git ls-files '*.go')"
