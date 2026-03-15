@@ -28,7 +28,9 @@ jobs:
       - name: gofmt
         shell: bash
         run: |
-          test -z "$(gofmt -l .)"
+          files="$(git ls-files '*.go')"
+          test -n "${files}"
+          test -z "$(gofmt -l ${files})"
 
       - name: go vet
         run: go vet ./...
