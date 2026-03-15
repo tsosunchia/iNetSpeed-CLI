@@ -118,13 +118,20 @@ path_has_dir() {
   return 1
 }
 
+cleanup() {
+  local dir="${1:-}"
+  if [[ -n "$dir" ]]; then
+    rm -rf -- "$dir"
+  fi
+}
+
 main() {
   local platform os arch ext asset archive_path sum_path tmpdir install_dir target extracted run_hint
   IFS='/' read -r os arch ext <<< "$(detect_platform)"
   asset="${BINARY}-${os}-${arch}.${ext}"
 
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "${tmpdir}"' EXIT
+  trap 'cleanup "${tmpdir:-}"' EXIT
   archive_path="${tmpdir}/${asset}"
   sum_path="${tmpdir}/checksums-sha256.txt"
 
