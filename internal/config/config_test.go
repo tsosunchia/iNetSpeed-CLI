@@ -310,3 +310,29 @@ func TestLoadLangFlagOverridesEnv(t *testing.T) {
 		t.Fatal("expected --lang zh to set zh locale")
 	}
 }
+
+func TestLoadNewFlags(t *testing.T) {
+	cfg, err := Load("--json", "--non-interactive", "--endpoint", "1.1.1.1", "--no-metadata")
+	if err != nil {
+		t.Fatalf("Load() should succeed: %v", err)
+	}
+	if !cfg.OutputJSON {
+		t.Fatal("expected OutputJSON to be true")
+	}
+	if !cfg.NonInteractive {
+		t.Fatal("expected NonInteractive to be true")
+	}
+	if cfg.EndpointIP != "1.1.1.1" {
+		t.Fatalf("EndpointIP = %q", cfg.EndpointIP)
+	}
+	if !cfg.NoMetadata {
+		t.Fatal("expected NoMetadata to be true")
+	}
+}
+
+func TestLoadInvalidEndpointIP(t *testing.T) {
+	_, err := Load("--endpoint", "not-an-ip")
+	if err == nil {
+		t.Fatal("expected invalid endpoint IP to fail")
+	}
+}

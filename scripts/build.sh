@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── Configuration ──────────────────────────────────────────────────────
-MODULE="github.com/tsosunchia/iNetSpeed-CLI"
 BINARY="speedtest"
 DIST="dist"
 
@@ -23,30 +21,58 @@ PLATFORMS=(
   "windows/amd64"
 )
 
-# ── Build ──────────────────────────────────────────────────────────────
+checksum_file="${DIST}/checksums-sha256.txt"
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "${tmpdir}"' EXIT
+
 rm -rf "${DIST}"
 mkdir -p "${DIST}"
+
+checksum_cmd() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+    return
+  fi
+  shasum -a 256 "$1" | awk '{print $1}'
+}
 
 echo "Building ${BINARY} ${VERSION} (${COMMIT}) ..."
 
 for platform in "${PLATFORMS[@]}"; do
-  GOOS="${platform%/*}"
-  GOARCH="${platform#*/}"
-  output="${DIST}/${BINARY}-${GOOS}-${GOARCH}"
-  if [[ "${GOOS}" == "windows" ]]; then
-    output="${output}.exe"
+  goos="${platform%/*}"
+  goarch="${platform#*/}"
+  stage="${tmpdir}/${goos}-${goarch}"
+  mkdir -p "${stage}"
+
+  binary_name="${BINARY}"
+  archive_name="${BINARY}-${goos}-${goarch}"
+  if [[ "${goos}" == "windows" ]]; then
+    binary_name="${binary_name}.exe"
   fi
 
-  echo "  → ${GOOS}/${GOARCH}"
-  CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" \
-    go build -trimpath -ldflags "${LDFLAGS}" -o "${output}" ./cmd/speedtest/
+  echo "  → ${goos}/${goarch}"
+  CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+    go build -trimpath -ldflags "${LDFLAGS}" -o "${stage}/${binary_name}" ./cmd/speedtest
+
+  cp README.md LICENSE "${stage}/"
+
+  if [[ "${goos}" == "windows" ]]; then
+    archive_path="${DIST}/${archive_name}.zip"
+    (
+      cd "${stage}"
+      zip -q "${OLDPWD}/${archive_path}" "${binary_name}" README.md LICENSE
+    )
+  else
+    archive_path="${DIST}/${archive_name}.tar.gz"
+    tar -C "${stage}" -czf "${archive_path}" "${binary_name}" README.md LICENSE
+  fi
 done
 
-# ── Checksums ──────────────────────────────────────────────────────────
-echo "Generating checksums ..."
-cd "${DIST}"
-shasum -a 256 "${BINARY}"-* > checksums-sha256.txt
-cd ..
+: > "${checksum_file}"
+for asset in "${DIST}"/*; do
+  [[ "${asset}" == "${checksum_file}" ]] && continue
+  printf "%s  %s\n" "$(checksum_cmd "${asset}")" "$(basename "${asset}")" >> "${checksum_file}"
+done
 
 echo "Done. Artifacts in ${DIST}/:"
 ls -lh "${DIST}/"

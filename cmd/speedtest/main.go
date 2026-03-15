@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -45,7 +47,10 @@ func main() {
 
 	var r render.Renderer
 	isTTY := render.IsTTY()
-	if isTTY {
+	if cfg.OutputJSON {
+		r = render.NewPlainRenderer(io.Discard)
+		isTTY = false
+	} else if isTTY {
 		r = render.NewTTYRenderer()
 	} else {
 		r = render.NewPlainRenderer(os.Stderr)
@@ -56,9 +61,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	exitCode := runner.Run(ctx, cfg, bus, isTTY)
+	result := runner.Run(ctx, cfg, bus, isTTY)
 	bus.Close()
-	os.Exit(exitCode)
+	if cfg.OutputJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(result); err != nil {
+			fmt.Fprintf(os.Stderr, "  [\u2717] %s\n", err)
+			os.Exit(1)
+		}
+	}
+	os.Exit(result.ExitCode)
 }
 
 func isVersionRequest(args []string) bool {

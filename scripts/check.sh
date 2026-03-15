@@ -2,10 +2,10 @@
 set -euo pipefail
 
 echo "=== gofmt check ==="
-UNFORMATTED=$(gofmt -l . 2>&1 || true)
-if [[ -n "${UNFORMATTED}" ]]; then
+unformatted="$(gofmt -l . 2>&1 || true)"
+if [[ -n "${unformatted}" ]]; then
   echo "ERROR: Files not formatted:"
-  echo "${UNFORMATTED}"
+  echo "${unformatted}"
   exit 1
 fi
 echo "  OK"
@@ -18,12 +18,22 @@ echo "=== go test ==="
 go test ./... -count=1
 echo "  OK"
 
-echo "=== go test -race ==="
-go test -race ./... -count=1
-echo "  OK"
+if [[ "$(go env GOOS)" != "windows" ]]; then
+  echo "=== go test -race ==="
+  go test -race ./... -count=1
+  echo "  OK"
+fi
 
-echo "=== shell tests ==="
-bash "$(dirname "$0")/apple-cdn-speedtest_test.sh"
+echo "=== CLI smoke ==="
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "${tmpdir}"' EXIT
+binary="${tmpdir}/speedtest"
+if [[ "$(go env GOOS)" == "windows" ]]; then
+  binary="${binary}.exe"
+fi
+go build -o "${binary}" ./cmd/speedtest
+"${binary}" --help >/dev/null
+"${binary}" --version >/dev/null
 echo "  OK"
 
 echo ""

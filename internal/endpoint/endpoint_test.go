@@ -182,8 +182,8 @@ func TestChooseSystemDNSFallback(t *testing.T) {
 	if ep.IP != "9.9.9.9" {
 		t.Errorf("expected system fallback IP, got %+v", ep)
 	}
-	if ep.Desc != "system DNS fallback" {
-		t.Errorf("expected fallback desc, got %q", ep.Desc)
+	if ep.Source != "system_dns" {
+		t.Errorf("expected system_dns source, got %q", ep.Source)
 	}
 }
 
@@ -212,6 +212,67 @@ func TestChooseNoFallbackWhenDualDoHNoIPs(t *testing.T) {
 	}
 	if resolveSystemCalled {
 		t.Error("expected system DNS not to be called")
+	}
+}
+
+func TestDiscoverAutoSelectsFastestCandidate(t *testing.T) {
+	oldResolveDoH := resolveDoHFn
+	oldFetchIPDesc := fetchIPDescFn
+	oldProbe := probeEndpointFn
+	t.Cleanup(func() {
+		resolveDoHFn = oldResolveDoH
+		fetchIPDescFn = oldFetchIPDesc
+		probeEndpointFn = oldProbe
+	})
+
+	resolveDoHFn = func(_ context.Context, _ string) ([]string, bool, bool) {
+		return []string{"1.1.1.1", "2.2.2.2"}, false, false
+	}
+	fetchIPDescFn = func(_ context.Context, ip string) string { return "desc-" + ip }
+	probeEndpointFn = func(_ context.Context, _ string, _ string, ip string) (float64, error) {
+		if ip == "1.1.1.1" {
+			return 35, nil
+		}
+		return 10, nil
+	}
+
+	res := Discover(context.Background(), "example.com", DiscoveryOptions{
+		ProbeURL: "https://example.com/probe",
+		Metadata: true,
+	})
+	if len(res.Candidates) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(res.Candidates))
+	}
+	if res.Selected.IP != "2.2.2.2" {
+		t.Fatalf("expected fastest candidate to be selected, got %+v", res.Selected)
+	}
+	if res.Candidates[0].IP != "2.2.2.2" {
+		t.Fatalf("expected fastest candidate first, got %+v", res.Candidates)
+	}
+}
+
+func TestDiscoverHonorsForcedEndpoint(t *testing.T) {
+	oldProbe := probeEndpointFn
+	t.Cleanup(func() {
+		probeEndpointFn = oldProbe
+	})
+
+	probeEndpointFn = func(_ context.Context, _ string, _ string, ip string) (float64, error) {
+		if ip != "9.9.9.9" {
+			t.Fatalf("unexpected IP %q", ip)
+		}
+		return 12, nil
+	}
+
+	res := Discover(context.Background(), "example.com", DiscoveryOptions{
+		ProbeURL:   "https://example.com/probe",
+		EndpointIP: "9.9.9.9",
+	})
+	if res.Selected.IP != "9.9.9.9" {
+		t.Fatalf("expected forced endpoint, got %+v", res.Selected)
+	}
+	if res.Selected.Source != "user" {
+		t.Fatalf("expected user source, got %+v", res.Selected)
 	}
 }
 

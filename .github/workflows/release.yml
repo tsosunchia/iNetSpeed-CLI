@@ -12,14 +12,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: "1.25.4"
           cache: true
-      - run: bash scripts/check.sh
+
+      - name: Quality checks
+        run: bash scripts/check.sh
+
+  smoke:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.4"
+          cache: true
+
+      - name: Build and smoke
+        shell: bash
+        run: |
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "${tmpdir}"' EXIT
+          binary="${tmpdir}/speedtest"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          go build -o "${binary}" ./cmd/speedtest
+          "${binary}" --help >/dev/null
+          "${binary}" --version >/dev/null
 
   release:
-    needs: test
+    needs: smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,25 +59,25 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: "1.25.4"
           cache: true
 
-      - name: Build release binaries
-        run: |
-          VERSION="${GITHUB_REF_NAME}" bash scripts/build.sh
+      - name: Build archives
+        run: VERSION="${GITHUB_REF_NAME}" bash scripts/build.sh
 
       - name: Verify release artifacts
         run: |
-          test -f dist/speedtest-darwin-amd64
-          test -f dist/speedtest-darwin-arm64
-          test -f dist/speedtest-linux-amd64
-          test -f dist/speedtest-linux-arm64
-          test -f dist/speedtest-windows-amd64.exe
+          test -f dist/speedtest-darwin-amd64.tar.gz
+          test -f dist/speedtest-darwin-arm64.tar.gz
+          test -f dist/speedtest-linux-amd64.tar.gz
+          test -f dist/speedtest-linux-arm64.tar.gz
+          test -f dist/speedtest-windows-amd64.zip
+          test -f dist/checksums-sha256.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: binaries
+          name: release-artifacts
           path: dist/
 
       - name: Create GitHub Release
@@ -55,5 +86,6 @@ jobs:
           draft: true
           generate_release_notes: true
           files: |
-            dist/speedtest-*
+            dist/*.tar.gz
+            dist/*.zip
             dist/checksums-sha256.txt

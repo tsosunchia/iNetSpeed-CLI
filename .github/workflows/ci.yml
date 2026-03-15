@@ -3,22 +3,8 @@ name: CI
 on:
   push:
     branches: [ main ]
-    paths:
-      - '**/*.go'
-      - 'go.mod'
-      - 'go.sum'
-      - 'scripts/check.sh'
-      - 'scripts/apple-cdn-speedtest.sh'
-      - 'scripts/apple-cdn-speedtest_test.sh'
   pull_request:
     branches: [ main ]
-    paths:
-      - '**/*.go'
-      - 'go.mod'
-      - 'go.sum'
-      - 'scripts/check.sh'
-      - 'scripts/apple-cdn-speedtest.sh'
-      - 'scripts/apple-cdn-speedtest_test.sh'
 
 permissions:
   contents: read
@@ -26,9 +12,10 @@ permissions:
 jobs:
   check:
     strategy:
+      fail-fast: false
       matrix:
-        go-version: ['stable', 'oldstable']
-        os: [ubuntu-latest, macos-latest]
+        go-version: ["1.25.4", "1.26.1"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,5 +25,30 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
 
-      - name: Quality checks
-        run: bash scripts/check.sh
+      - name: gofmt
+        shell: bash
+        run: |
+          test -z "$(gofmt -l .)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./... -count=1
+
+      - name: go test -race
+        if: runner.os != 'Windows'
+        run: go test -race ./... -count=1
+
+      - name: CLI smoke
+        shell: bash
+        run: |
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "${tmpdir}"' EXIT
+          binary="${tmpdir}/speedtest"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          go build -o "${binary}" ./cmd/speedtest
+          "${binary}" --help >/dev/null
+          "${binary}" --version >/dev/null

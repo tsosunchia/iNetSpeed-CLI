@@ -17,7 +17,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/config"
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/i18n"
+	"github.com/tsosunchia/iNetSpeed-CLI/internal/netx"
 	"github.com/tsosunchia/iNetSpeed-CLI/internal/render"
 )
 
@@ -30,19 +32,51 @@ var (
 	aliDoHURLTemplate     = "https://dns.alidns.com/resolve?name=%s&type=A&short=1"
 	aliDoHAAAAURLTemplate = "https://dns.alidns.com/resolve?name=%s&type=AAAA&short=1"
 
-	// dohTimeout is the per-provider timeout for DoH queries.
-	dohTimeout = 1 * time.Second
-
-	dohHTTPClient     = http.DefaultClient
-	resolveDoHFn      = resolveDoHDual
-	resolveSystemFn   = resolveSystem
-	fetchIPDescFn     = fetchIPDesc
-	openPromptInputFn = openPromptInput
+	dohTimeout         = 1 * time.Second
+	dohHTTPClient      = netx.NewClient(netx.Options{Timeout: 4 * time.Second})
+	metadataHTTPClient = netx.NewClient(netx.Options{Timeout: 5 * time.Second})
+	resolveDoHFn       = resolveDoHDual
+	resolveSystemFn    = resolveSystem
+	fetchIPDescFn      = fetchIPDesc
+	fetchInfoFn        = fetchInfo
+	probeEndpointFn    = probeEndpoint
+	openPromptInputFn  = openPromptInput
 )
 
 type Endpoint struct {
-	IP   string
-	Desc string
+	IP     string
+	Desc   string
+	RTTMs  float64
+	Source string
+	Status string
+}
+
+type Candidate struct {
+	IP     string
+	Desc   string
+	RTTMs  float64
+	Source string
+	Status string
+	Error  string
+}
+
+type Warning struct {
+	Code    string
+	Message string
+}
+
+type DiscoveryOptions struct {
+	ProbeURL   string
+	EndpointIP string
+	Metadata   bool
+}
+
+type DiscoveryResult struct {
+	Host       string
+	Candidates []Candidate
+	Selected   Endpoint
+	Warnings   []Warning
+	DefaultDNS bool
 }
 
 type IPInfo struct {
@@ -56,63 +90,114 @@ type IPInfo struct {
 	Country    string `json:"country"`
 }
 
-// dohResult holds the outcome of a single DoH provider query.
 type dohResult struct {
 	ips      []string
 	timedOut bool
 	err      error
 }
 
-func Choose(ctx context.Context, host string, bus *render.Bus, isTTY bool) Endpoint {
-	bus.Header(i18n.Text("Endpoint Selection", "节点选择"))
+type dohResponse struct {
+	Answer []struct {
+		Data string `json:"data"`
+	} `json:"Answer"`
+}
+
+func Discover(ctx context.Context, host string, opts DiscoveryOptions) DiscoveryResult {
+	res := DiscoveryResult{Host: host}
 	if host == "" {
-		bus.Warn(i18n.Text("Could not parse host from DL_URL. Skip endpoint selection.", "无法从 DL_URL 解析主机，跳过节点选择。"))
-		return Endpoint{}
+		res.DefaultDNS = true
+		res.Warnings = append(res.Warnings, Warning{
+			Code:    "host_unavailable",
+			Message: i18n.Text("Could not parse host from URL. Continue with default DNS.", "无法从 URL 解析主机，继续使用默认 DNS。"),
+		})
+		res.Selected = Endpoint{Source: "default_dns", Status: "degraded"}
+		return res
 	}
-	bus.Info(i18n.Text("Host: ", "主机: ") + host)
+
+	if opts.EndpointIP != "" {
+		candidate := buildCandidate(ctx, host, opts.EndpointIP, "user", opts)
+		res.Candidates = []Candidate{candidate}
+		res.Selected = endpointFromCandidate(candidate)
+		if candidate.Error != "" {
+			res.Warnings = append(res.Warnings, Warning{
+				Code:    "endpoint_probe_failed",
+				Message: i18n.Text("Forced endpoint probe failed; continuing with the requested IP.", "指定节点探测失败，继续使用用户指定 IP。"),
+			})
+		}
+		return res
+	}
 
 	ips, cfTimedOut, aliTimedOut := resolveDoHFn(ctx, host)
-	if len(ips) == 0 {
-		if cfTimedOut && aliTimedOut {
-			bus.Warn(i18n.Text("Dual DoH (CF + Ali) both timed out. Fallback to system DNS.", "双 DoH（CF + Ali）均超时，回退系统 DNS。"))
-			fb := resolveSystemFn(host)
-			if fb != "" {
-				ep := Endpoint{IP: fb, Desc: i18n.Text("system DNS fallback", "系统 DNS 回退")}
-				bus.Info(i18n.Text("Selected endpoint: ", "已选择节点: ") + ep.IP + " (" + ep.Desc + ")")
-				return ep
-			}
-			bus.Warn(i18n.Text("Could not resolve endpoint IP, continue with default DNS.", "无法解析节点 IP，继续使用默认 DNS。"))
-			return Endpoint{}
+	if len(ips) > 0 {
+		original := make([]Candidate, 0, len(ips))
+		for _, ip := range ips {
+			original = append(original, buildCandidate(ctx, host, ip, "doh", opts))
 		}
-		bus.Warn(i18n.Text("Dual DoH returned no endpoint, continue with default DNS.", "双 DoH 未返回节点，继续使用默认 DNS。"))
-		bus.Warn(i18n.Text("Could not resolve endpoint IP, continue with default DNS.", "无法解析节点 IP，继续使用默认 DNS。"))
-		return Endpoint{}
+		res.Candidates = orderCandidates(original)
+		res.Selected = chooseAuto(original, res.Candidates)
+		if res.Selected.IP == "" {
+			res.Selected = Endpoint{Source: "default_dns", Status: "degraded"}
+			res.DefaultDNS = true
+			res.Warnings = append(res.Warnings, Warning{
+				Code:    "default_dns_fallback",
+				Message: i18n.Text("No healthy endpoint candidate. Continue with default DNS.", "没有健康的候选节点，继续使用默认 DNS。"),
+			})
+		}
+		return res
 	}
 
-	endpoints := make([]Endpoint, 0, len(ips))
-	for _, ip := range ips {
-		desc := fetchIPDescFn(ctx, ip)
-		endpoints = append(endpoints, Endpoint{IP: ip, Desc: desc})
+	if cfTimedOut && aliTimedOut {
+		res.Warnings = append(res.Warnings, Warning{
+			Code:    "system_dns_fallback",
+			Message: i18n.Text("Dual DoH (CF + Ali) both timed out. Fallback to system DNS.", "双 DoH（CF + Ali）均超时，回退系统 DNS。"),
+		})
+		if ip := resolveSystemFn(host); ip != "" {
+			candidate := buildCandidate(ctx, host, ip, "system_dns", opts)
+			res.Candidates = []Candidate{candidate}
+			res.Selected = endpointFromCandidate(candidate)
+			return res
+		}
+	}
+
+	res.DefaultDNS = true
+	res.Selected = Endpoint{Source: "default_dns", Status: "degraded"}
+	res.Warnings = append(res.Warnings, Warning{
+		Code:    "default_dns_fallback",
+		Message: i18n.Text("Could not resolve endpoint IP. Continue with default DNS.", "无法解析节点 IP，继续使用默认 DNS。"),
+	})
+	return res
+}
+
+func Choose(ctx context.Context, host string, bus *render.Bus, isTTY bool) Endpoint {
+	bus.Header(i18n.Text("Endpoint Selection", "节点选择"))
+	res := Discover(ctx, host, DiscoveryOptions{Metadata: true})
+	if host != "" {
+		bus.Info(i18n.Text("Host: ", "主机: ") + host)
+	}
+	for _, warning := range res.Warnings {
+		bus.Warn(warning.Message)
+	}
+	if len(res.Candidates) == 0 {
+		return res.Selected
 	}
 
 	bus.Info(i18n.Text("Available endpoints:", "可用节点:"))
-	for i, ep := range endpoints {
-		bus.Info(fmt.Sprintf("  %d) %s  %s", i+1, ep.IP, ep.Desc))
+	for i, candidate := range res.Candidates {
+		bus.Info(fmt.Sprintf("  %d) %s  %s", i+1, candidate.IP, candidateLabel(candidate)))
 	}
 
-	choice := 0
-	if len(endpoints) > 1 && isTTY {
-		// Ensure all queued endpoint lines are rendered before interactive prompt.
+	selected := res.Selected
+	if len(res.Candidates) > 1 && isTTY {
 		bus.Flush()
-		var cancelled bool
-		choice, cancelled = promptChoice(ctx, len(endpoints), bus)
+		choice, cancelled := promptChoice(ctx, len(res.Candidates), bus)
 		if cancelled {
-			// Don't log here; runner.go checks ctx.Err() and logs "Interrupted" once.
 			return Endpoint{}
 		}
+		selected = endpointFromCandidate(res.Candidates[choice])
 	}
-	selected := endpoints[choice]
-	bus.Info(fmt.Sprintf(i18n.Text("Selected endpoint: %s (%s)", "已选择节点: %s (%s)"), selected.IP, selected.Desc))
+	if selected.IP != "" {
+		bus.Info(fmt.Sprintf(i18n.Text("Selected endpoint: %s (%s)", "已选择节点: %s (%s)"), selected.IP, selected.Desc))
+	}
 	return selected
 }
 
@@ -124,42 +209,40 @@ func HostFromURL(rawURL string) string {
 	return u.Hostname()
 }
 
-type dohResponse struct {
-	Answer []struct {
-		Data string `json:"data"`
-	} `json:"Answer"`
+func ResolveHost(host string) string {
+	return resolveSystem(host)
 }
 
-// resolveDoHDual concurrently queries both CF and Ali DoH providers for A
-// and AAAA records (four queries total). It returns the merged IP list in
-// the order CF-A, CF-AAAA, Ali-A, Ali-AAAA (deduplicated) and each
-// provider's timeout status. A provider is considered timed-out only when
-// both its A and AAAA queries timed out.
+func FetchInfo(ctx context.Context, target string) IPInfo {
+	return fetchInfoFn(ctx, target)
+}
+
+func PromptChoice(ctx context.Context, count int, bus *render.Bus) (int, bool) {
+	return promptChoice(ctx, count, bus)
+}
+
+func CandidateLabel(candidate Candidate) string {
+	return candidateLabel(candidate)
+}
+
 func resolveDoHDual(ctx context.Context, host string) ([]string, bool, bool) {
 	var wg sync.WaitGroup
 	wg.Add(4)
 
 	var cfARes, cfAAAARes, aliARes, aliAAAARes dohResult
 
-	// Cloudflare DoH A
 	go func() {
 		defer wg.Done()
 		cfARes = queryCFDoH(ctx, host, cfDoHURLTemplate)
 	}()
-
-	// Cloudflare DoH AAAA
 	go func() {
 		defer wg.Done()
 		cfAAAARes = queryCFDoH(ctx, host, cfDoHAAAAURLTemplate)
 	}()
-
-	// AliDNS DoH A
 	go func() {
 		defer wg.Done()
 		aliARes = queryAliDoH(ctx, host, aliDoHURLTemplate)
 	}()
-
-	// AliDNS DoH AAAA
 	go func() {
 		defer wg.Done()
 		aliAAAARes = queryAliDoH(ctx, host, aliDoHAAAAURLTemplate)
@@ -167,14 +250,12 @@ func resolveDoHDual(ctx context.Context, host string) ([]string, bool, bool) {
 
 	wg.Wait()
 
-	// Merge order: CF-A, CF-AAAA, Ali-A, Ali-AAAA (deduplicated)
 	merged := mergeIPs4(cfARes.ips, cfAAAARes.ips, aliARes.ips, aliAAAARes.ips)
 	cfTimedOut := cfARes.timedOut && cfAAAARes.timedOut
 	aliTimedOut := aliARes.timedOut && aliAAAARes.timedOut
 	return merged, cfTimedOut, aliTimedOut
 }
 
-// queryCFDoH queries Cloudflare DoH (application/dns-json format).
 func queryCFDoH(ctx context.Context, host string, urlTemplate string) dohResult {
 	ctx2, cancel := context.WithTimeout(ctx, dohTimeout)
 	defer cancel()
@@ -185,6 +266,7 @@ func queryCFDoH(ctx context.Context, host string, urlTemplate string) dohResult 
 		return dohResult{err: err}
 	}
 	req.Header.Set("Accept", "application/dns-json")
+	req.Header.Set("User-Agent", "iNetSpeed-CLI")
 
 	resp, err := dohHTTPClient.Do(req)
 	if err != nil {
@@ -198,11 +280,9 @@ func queryCFDoH(ctx context.Context, host string, urlTemplate string) dohResult 
 	if err != nil {
 		return dohResult{timedOut: isTimeoutErr(err), err: err}
 	}
-	ips := extractIPsFromBody(body)
-	return dohResult{ips: ips}
+	return dohResult{ips: extractIPsFromBody(body)}
 }
 
-// queryAliDoH queries AliDNS DoH (short=1 format).
 func queryAliDoH(ctx context.Context, host string, urlTemplate string) dohResult {
 	ctx2, cancel := context.WithTimeout(ctx, dohTimeout)
 	defer cancel()
@@ -212,6 +292,7 @@ func queryAliDoH(ctx context.Context, host string, urlTemplate string) dohResult
 	if err != nil {
 		return dohResult{err: err}
 	}
+	req.Header.Set("User-Agent", "iNetSpeed-CLI")
 
 	resp, err := dohHTTPClient.Do(req)
 	if err != nil {
@@ -225,21 +306,16 @@ func queryAliDoH(ctx context.Context, host string, urlTemplate string) dohResult
 	if err != nil {
 		return dohResult{timedOut: isTimeoutErr(err), err: err}
 	}
-	ips := extractIPsFromBody(body)
-	return dohResult{ips: ips}
+	return dohResult{ips: extractIPsFromBody(body)}
 }
 
-// extractIPsFromBody tries JSON structured parsing first, then falls back to
-// regex extraction. Returns deduplicated IP addresses (IPv4 and/or IPv6)
-// preserving order.
 func extractIPsFromBody(body []byte) []string {
-	// Try structured JSON first
 	var dr dohResponse
 	if json.Unmarshal(body, &dr) == nil && len(dr.Answer) > 0 {
 		seen := map[string]bool{}
 		var out []string
-		for _, a := range dr.Answer {
-			ip := strings.TrimSpace(a.Data)
+		for _, answer := range dr.Answer {
+			ip := strings.TrimSpace(answer.Data)
 			if net.ParseIP(ip) != nil && !seen[ip] {
 				seen[ip] = true
 				out = append(out, ip)
@@ -250,53 +326,39 @@ func extractIPsFromBody(body []byte) []string {
 		}
 	}
 
-	// Regex fallback: find all IPv4 and IPv6 matches by position to
-	// preserve the order they appear in the response body.
-	s := string(body)
+	text := string(body)
 	type match struct {
 		pos int
 		ip  string
 	}
 	var matches []match
-	for _, loc := range ipv4Re.FindAllStringIndex(s, -1) {
-		matches = append(matches, match{pos: loc[0], ip: s[loc[0]:loc[1]]})
+	for _, loc := range ipv4Re.FindAllStringIndex(text, -1) {
+		matches = append(matches, match{pos: loc[0], ip: text[loc[0]:loc[1]]})
 	}
-	for _, loc := range ipv6Re.FindAllStringIndex(s, -1) {
-		matches = append(matches, match{pos: loc[0], ip: s[loc[0]:loc[1]]})
+	for _, loc := range ipv6Re.FindAllStringIndex(text, -1) {
+		matches = append(matches, match{pos: loc[0], ip: text[loc[0]:loc[1]]})
 	}
 	sort.Slice(matches, func(i, j int) bool { return matches[i].pos < matches[j].pos })
 	seen := map[string]bool{}
 	var out []string
-	for _, m := range matches {
-		if net.ParseIP(m.ip) == nil {
+	for _, match := range matches {
+		if net.ParseIP(match.ip) == nil || seen[match.ip] {
 			continue
 		}
-		if !seen[m.ip] {
-			seen[m.ip] = true
-			out = append(out, m.ip)
-		}
+		seen[match.ip] = true
+		out = append(out, match.ip)
 	}
 	return out
 }
 
-// mergeIPs merges two IP slices (first before second) and deduplicates.
 func mergeIPs(first, second []string) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, ip := range first {
-		if net.ParseIP(ip) == nil {
-			continue
-		}
-		if !seen[ip] {
-			seen[ip] = true
-			out = append(out, ip)
-		}
-	}
-	for _, ip := range second {
-		if net.ParseIP(ip) == nil {
-			continue
-		}
-		if !seen[ip] {
+	for _, list := range [][]string{first, second} {
+		for _, ip := range list {
+			if net.ParseIP(ip) == nil || seen[ip] {
+				continue
+			}
 			seen[ip] = true
 			out = append(out, ip)
 		}
@@ -304,26 +366,21 @@ func mergeIPs(first, second []string) []string {
 	return out
 }
 
-// mergeIPs4 merges four IP slices in order and deduplicates.
 func mergeIPs4(a, b, c, d []string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, list := range [][]string{a, b, c, d} {
 		for _, ip := range list {
-			if net.ParseIP(ip) == nil {
+			if net.ParseIP(ip) == nil || seen[ip] {
 				continue
 			}
-			if !seen[ip] {
-				seen[ip] = true
-				out = append(out, ip)
-			}
+			seen[ip] = true
+			out = append(out, ip)
 		}
 	}
 	return out
 }
 
-// isTimeoutErr checks whether an error is a timeout (context deadline exceeded
-// or net.Error timeout).
 func isTimeoutErr(err error) bool {
 	if err == nil {
 		return false
@@ -334,26 +391,25 @@ func isTimeoutErr(err error) bool {
 	if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		return true
 	}
-	// Also check wrapped errors
 	if ue, ok := err.(*url.Error); ok {
 		return isTimeoutErr(ue.Err)
 	}
 	return false
 }
 
-// ResolveHost tries system DNS and returns the first IPv4 address, or "".
-func ResolveHost(host string) string {
-	return resolveSystem(host)
-}
-
 func resolveSystem(host string) string {
-	addrs, err := net.LookupHost(host)
+	addrs, err := net.LookupIP(host)
 	if err != nil {
 		return ""
 	}
-	for _, a := range addrs {
-		if net.ParseIP(a) != nil && strings.Contains(a, ".") {
-			return a
+	for _, ip := range addrs {
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String()
+		}
+	}
+	for _, ip := range addrs {
+		if ip != nil {
+			return ip.String()
 		}
 	}
 	return ""
@@ -369,16 +425,30 @@ func fetchIPDesc(ctx context.Context, ip string) string {
 			}
 		}
 		desc, err := doFetchIPDesc(ctx, ip)
-		if err != nil {
-			continue
+		if err == nil {
+			return desc
 		}
-		return desc
 	}
 	return i18n.Text("lookup failed", "查询失败")
 }
 
-// ipAPILangSuffix returns "&lang=zh-CN" when the UI language is Chinese,
-// otherwise an empty string (ip-api defaults to English).
+func fetchInfo(ctx context.Context, target string) IPInfo {
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return IPInfo{}
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			}
+		}
+		info, err := doFetchInfo(ctx, target)
+		if err == nil {
+			return info
+		}
+	}
+	return IPInfo{}
+}
+
 func ipAPILangSuffix() string {
 	if i18n.IsZH() {
 		return "&lang=zh-CN"
@@ -386,9 +456,6 @@ func ipAPILangSuffix() string {
 	return ""
 }
 
-// buildIPAPIURL constructs an ip-api JSON endpoint URL with the given target
-// (empty string for self-lookup) and fields, appending the language suffix
-// when in Chinese mode.
 func buildIPAPIURL(target, fields string) string {
 	if target == "" {
 		return fmt.Sprintf("http://ip-api.com/json/?fields=%s%s", fields, ipAPILangSuffix())
@@ -400,12 +467,12 @@ func doFetchIPDesc(ctx context.Context, ip string) (string, error) {
 	ctx2, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 
-	reqURL := buildIPAPIURL(ip, "status,city,regionName,country,as,org")
-	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, buildIPAPIURL(ip, "status,city,regionName,country,as,org"), nil)
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	req.Header.Set("User-Agent", "iNetSpeed-CLI")
+	resp, err := metadataHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -424,10 +491,16 @@ func doFetchIPDesc(ctx context.Context, ip string) (string, error) {
 
 	loc := info.City
 	if info.RegionName != "" && info.RegionName != info.City {
-		loc += ", " + info.RegionName
+		if loc != "" {
+			loc += ", "
+		}
+		loc += info.RegionName
 	}
 	if info.Country != "" {
-		loc += ", " + info.Country
+		if loc != "" {
+			loc += ", "
+		}
+		loc += info.Country
 	}
 	if loc == "" {
 		loc = i18n.Text("unknown location", "未知位置")
@@ -442,39 +515,20 @@ func doFetchIPDesc(ctx context.Context, ip string) (string, error) {
 	return loc, nil
 }
 
-func FetchInfo(ctx context.Context, target string) IPInfo {
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return IPInfo{}
-			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
-			}
-		}
-		info, err := doFetchInfo(ctx, target)
-		if err != nil {
-			continue
-		}
-		return info
-	}
-	return IPInfo{}
-}
-
 func doFetchInfo(ctx context.Context, target string) (IPInfo, error) {
 	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	var reqURL string
-	if target == "" {
-		reqURL = buildIPAPIURL("", "status,query,as,isp,city,regionName,country")
-	} else {
-		reqURL = buildIPAPIURL(target, "status,query,as,isp,org,city,regionName,country")
+	fields := "status,query,as,isp,city,regionName,country"
+	if target != "" {
+		fields = "status,query,as,isp,org,city,regionName,country"
 	}
-	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, buildIPAPIURL(target, fields), nil)
 	if err != nil {
 		return IPInfo{}, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	req.Header.Set("User-Agent", "iNetSpeed-CLI")
+	resp, err := metadataHTTPClient.Do(req)
 	if err != nil {
 		return IPInfo{}, err
 	}
@@ -482,6 +536,7 @@ func doFetchInfo(ctx context.Context, target string) (IPInfo, error) {
 	if resp.StatusCode != http.StatusOK {
 		return IPInfo{}, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
+
 	var info IPInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		return IPInfo{}, err
@@ -492,9 +547,42 @@ func doFetchInfo(ctx context.Context, target string) (IPInfo, error) {
 	return info, nil
 }
 
-// promptChoice displays an interactive prompt and waits for user input.
-// It returns (choiceIndex, cancelled). When ctx is cancelled (e.g. Ctrl+C),
-// the tty is closed to unblock the read and cancelled=true is returned.
+func probeEndpoint(ctx context.Context, host, probeURL, ip string) (float64, error) {
+	if host == "" || probeURL == "" || ip == "" {
+		return 0, fmt.Errorf("probe unavailable")
+	}
+
+	client := netx.NewClient(netx.Options{
+		PinHost: host,
+		PinIP:   ip,
+		Timeout: 3 * time.Second,
+	})
+	ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, probeURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("User-Agent", config.UserAgent)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Encoding", "identity")
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return 0, err
+	}
+	return float64(time.Since(start).Microseconds()) / 1000.0, nil
+}
+
 func promptChoice(ctx context.Context, count int, bus *render.Bus) (int, bool) {
 	fmt.Fprintf(os.Stderr, "  \033[36m\033[1m[?]\033[0m %s", fmt.Sprintf(i18n.Text("Select endpoint [1-%d, Enter=1]: ", "选择节点 [1-%d，回车=1]: "), count))
 
@@ -513,30 +601,25 @@ func promptChoice(ctx context.Context, count int, bus *render.Bus) (int, bool) {
 	go func() {
 		reader := bufio.NewReader(tty)
 		line, err := reader.ReadString('\n')
-		ch <- readResult{line, err}
+		ch <- readResult{line: line, err: err}
 	}()
 
 	select {
 	case <-ctx.Done():
-		// Context cancelled (e.g. Ctrl+C). Close the tty to try to
-		// unblock the goroutine. We do NOT wait for the goroutine:
-		// on some OSes (macOS) closing a tty won't unblock a concurrent
-		// read, and the process is about to exit anyway.
 		if shouldClose {
 			tty.Close()
 		}
 		return 0, true
-	case res := <-ch:
+	case result := <-ch:
 		if shouldClose {
 			tty.Close()
 		}
-		if res.err != nil && res.line == "" {
-			// EOF or read error with no data — treat as default
+		if result.err != nil && result.line == "" {
 			return 0, false
 		}
-		choice, ok := parseChoice(res.line, count)
+		choice, ok := parseChoice(result.line, count)
 		if !ok {
-			line := strings.TrimSpace(res.line)
+			line := strings.TrimSpace(result.line)
 			bus.Warn(fmt.Sprintf(i18n.Text("Invalid selection '%s', fallback to 1.", "选择无效 '%s'，回退到 1。"), line))
 			return 0, false
 		}
@@ -545,10 +628,10 @@ func promptChoice(ctx context.Context, count int, bus *render.Bus) (int, bool) {
 }
 
 func openPromptInput() (*os.File, bool, error) {
-	for _, p := range []string{"/dev/tty", "CONIN$"} {
-		f, err := os.Open(p)
+	for _, path := range []string{"/dev/tty", "CONIN$"} {
+		file, err := os.Open(path)
 		if err == nil {
-			return f, true, nil
+			return file, true, nil
 		}
 	}
 
@@ -569,4 +652,82 @@ func parseChoice(line string, count int) (int, bool) {
 		return 0, false
 	}
 	return n - 1, true
+}
+
+func buildCandidate(ctx context.Context, host, ip, source string, opts DiscoveryOptions) Candidate {
+	candidate := Candidate{
+		IP:     ip,
+		Source: source,
+		Status: "degraded",
+	}
+	if opts.Metadata {
+		candidate.Desc = fetchIPDescFn(ctx, ip)
+	}
+	if opts.ProbeURL == "" {
+		return candidate
+	}
+	rtt, err := probeEndpointFn(ctx, host, opts.ProbeURL, ip)
+	if err != nil {
+		candidate.Error = err.Error()
+		return candidate
+	}
+	candidate.RTTMs = rtt
+	candidate.Status = "ok"
+	return candidate
+}
+
+func chooseAuto(original, ordered []Candidate) Endpoint {
+	for _, candidate := range ordered {
+		if candidate.Status == "ok" {
+			return endpointFromCandidate(candidate)
+		}
+	}
+	for _, candidate := range original {
+		if candidate.IP != "" {
+			return endpointFromCandidate(candidate)
+		}
+	}
+	return Endpoint{}
+}
+
+func orderCandidates(candidates []Candidate) []Candidate {
+	ordered := append([]Candidate(nil), candidates...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		leftOK := ordered[i].Status == "ok"
+		rightOK := ordered[j].Status == "ok"
+		if leftOK != rightOK {
+			return leftOK
+		}
+		if leftOK && rightOK && ordered[i].RTTMs != ordered[j].RTTMs {
+			return ordered[i].RTTMs < ordered[j].RTTMs
+		}
+		return false
+	})
+	return ordered
+}
+
+func endpointFromCandidate(candidate Candidate) Endpoint {
+	return Endpoint{
+		IP:     candidate.IP,
+		Desc:   candidate.Desc,
+		RTTMs:  candidate.RTTMs,
+		Source: candidate.Source,
+		Status: candidate.Status,
+	}
+}
+
+func candidateLabel(candidate Candidate) string {
+	parts := []string{}
+	if candidate.Desc != "" {
+		parts = append(parts, candidate.Desc)
+	}
+	if candidate.RTTMs > 0 {
+		parts = append(parts, fmt.Sprintf("%.2f ms", candidate.RTTMs))
+	} else if candidate.Error != "" {
+		parts = append(parts, i18n.Text("probe unavailable", "探测不可用"))
+	}
+	if len(parts) == 0 {
+		return i18n.Text("unavailable", "不可用")
+	}
+	return strings.Join(parts, "  ")
 }

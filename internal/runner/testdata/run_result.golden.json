@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "config": {
+    "dl_url": "https://example.com/dl",
+    "ul_url": "https://example.com/ul",
+    "latency_url": "https://example.com/ping",
+    "max": "1G",
+    "max_bytes": 1000000000,
+    "timeout_seconds": 10,
+    "threads": 4,
+    "latency_count": 20,
+    "json": true,
+    "non_interactive": true,
+    "endpoint_ip": "1.1.1.1",
+    "metadata": false
+  },
+  "candidates": [
+    {
+      "ip": "1.1.1.1",
+      "description": "Tokyo, Japan",
+      "rtt_ms": 12.34,
+      "source": "user",
+      "status": "ok"
+    }
+  ],
+  "selected_endpoint": {
+    "ip": "1.1.1.1",
+    "description": "Tokyo, Japan",
+    "rtt_ms": 12.34,
+    "source": "user",
+    "status": "ok"
+  },
+  "connection_info": {
+    "status": "unavailable",
+    "metadata_enabled": false,
+    "host": "example.com",
+    "client": {
+      "status": "unavailable"
+    },
+    "server": {
+      "status": "unavailable"
+    }
+  },
+  "idle_latency": {
+    "status": "ok",
+    "samples": 2,
+    "min_ms": 10.1,
+    "avg_ms": 11.2,
+    "median_ms": 11.1,
+    "max_ms": 12.3,
+    "jitter_ms": 1.1
+  },
+  "rounds": [
+    {
+      "name": "Download (single thread)",
+      "direction": "download",
+      "threads": 1,
+      "status": "ok",
+      "url": "https://example.com/dl",
+      "total_bytes": 123456,
+      "duration_ms": 500,
+      "mbps": 19.75,
+      "fault_count": 0,
+      "had_fault": false,
+      "loaded_latency": {
+        "status": "ok",
+        "samples": 1,
+        "min_ms": 20,
+        "avg_ms": 20,
+        "median_ms": 20,
+        "max_ms": 20,
+        "jitter_ms": 0
+      }
+    }
+  ],
+  "total_bytes": 123456,
+  "warnings": [
+    {
+      "code": "mixed_hosts",
+      "message": "DL_URL, UL_URL and LATENCY_URL hosts differ. Shared endpoint pinning is disabled."
+    }
+  ],
+  "degraded": true,
+  "exit_code": 2,
+  "started_at": "2026-03-15T00:00:00Z",
+  "duration_ms": 500
+}

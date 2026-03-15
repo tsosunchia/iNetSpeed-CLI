@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"regexp"
 	"strconv"
@@ -27,14 +28,18 @@ const (
 var ErrHelp = errors.New("help requested")
 
 type Config struct {
-	DLURL        string
-	ULURL        string
-	LatencyURL   string
-	Max          string
-	MaxBytes     int64
-	Timeout      int
-	Threads      int
-	LatencyCount int
+	DLURL          string
+	ULURL          string
+	LatencyURL     string
+	Max            string
+	MaxBytes       int64
+	Timeout        int
+	Threads        int
+	LatencyCount   int
+	OutputJSON     bool
+	NonInteractive bool
+	EndpointIP     string
+	NoMetadata     bool
 }
 
 func Usage() string {
@@ -54,6 +59,10 @@ func Usage() string {
   --timeout SECONDS             单线程超时（秒），范围 1-120（默认取 TIMEOUT 或 %d）
   --threads N                   并发线程数，范围 1-64（默认取 THREADS 或 %d）
   --latency-count N             延迟采样次数，范围 1-100（默认取 LATENCY_COUNT 或 %d）
+  --json                        输出单个 JSON 文档到 stdout
+  --non-interactive             禁用节点交互选择并自动选点
+  --endpoint IP                 指定固定节点 IP，跳过发现流程
+  --no-metadata                 跳过客户端/服务端 ASN 与地理信息查询
 
 环境变量:
   DL_URL, UL_URL, LATENCY_URL, MAX, TIMEOUT, THREADS, LATENCY_COUNT
@@ -76,6 +85,10 @@ Options:
   --timeout SECONDS             Per-thread timeout in seconds, 1-120 (default from TIMEOUT or %d)
   --threads N                   Concurrent threads, 1-64 (default from THREADS or %d)
   --latency-count N             Latency sample count, 1-100 (default from LATENCY_COUNT or %d)
+  --json                        Output a single JSON document to stdout
+  --non-interactive             Disable endpoint prompt and auto-select
+  --endpoint IP                 Force a specific endpoint IP and skip discovery
+  --no-metadata                 Skip client/server ASN and location lookup
 
 Environment variables:
   DL_URL, UL_URL, LATENCY_URL, MAX, TIMEOUT, THREADS, LATENCY_COUNT
@@ -101,6 +114,10 @@ func Load(args ...string) (*Config, error) {
 	timeout := envInt("TIMEOUT", DefaultTimeout)
 	threads := envInt("THREADS", DefaultThreads)
 	latencyCount := envInt("LATENCY_COUNT", DefaultLatencyCount)
+	outputJSON := false
+	nonInteractive := false
+	endpointIP := ""
+	noMetadata := false
 
 	if len(args) > 0 {
 		fs := flag.NewFlagSet("speedtest", flag.ContinueOnError)
@@ -117,6 +134,10 @@ func Load(args ...string) (*Config, error) {
 		fs.IntVar(&timeout, "timeout", timeout, "per-thread timeout in seconds")
 		fs.IntVar(&threads, "threads", threads, "concurrent threads")
 		fs.IntVar(&latencyCount, "latency-count", latencyCount, "latency sample count")
+		fs.BoolVar(&outputJSON, "json", outputJSON, "output JSON")
+		fs.BoolVar(&nonInteractive, "non-interactive", nonInteractive, "disable interactive endpoint selection")
+		fs.StringVar(&endpointIP, "endpoint", endpointIP, "force endpoint IP")
+		fs.BoolVar(&noMetadata, "no-metadata", noMetadata, "skip metadata lookup")
 
 		if err := fs.Parse(args); err != nil {
 			return nil, err
@@ -134,13 +155,17 @@ func Load(args ...string) (*Config, error) {
 	}
 
 	c := &Config{
-		DLURL:        dlURL,
-		ULURL:        ulURL,
-		LatencyURL:   latencyURL,
-		Max:          maxValue,
-		Timeout:      timeout,
-		Threads:      threads,
-		LatencyCount: latencyCount,
+		DLURL:          dlURL,
+		ULURL:          ulURL,
+		LatencyURL:     latencyURL,
+		Max:            maxValue,
+		Timeout:        timeout,
+		Threads:        threads,
+		LatencyCount:   latencyCount,
+		OutputJSON:     outputJSON,
+		NonInteractive: nonInteractive,
+		EndpointIP:     endpointIP,
+		NoMetadata:     noMetadata,
 	}
 
 	var err error
@@ -172,6 +197,12 @@ func Load(args ...string) (*Config, error) {
 	if c.LatencyCount > 100 {
 		return nil, errors.New(i18n.Text("LATENCY_COUNT must be <= 100", "LATENCY_COUNT 必须小于等于 100"))
 	}
+	if c.EndpointIP != "" && net.ParseIP(c.EndpointIP) == nil {
+		if i18n.IsZH() {
+			return nil, fmt.Errorf("节点 IP 无效 %q", c.EndpointIP)
+		}
+		return nil, fmt.Errorf("invalid endpoint IP %q", c.EndpointIP)
+	}
 	for _, u := range []struct{ name, val string }{
 		{"DL_URL", c.DLURL},
 		{"UL_URL", c.ULURL},
@@ -189,11 +220,11 @@ func Load(args ...string) (*Config, error) {
 
 func (c *Config) Summary() string {
 	if i18n.IsZH() {
-		return fmt.Sprintf("超时=%ds  上限=%s  线程=%d  延迟采样=%d",
-			c.Timeout, c.Max, c.Threads, c.LatencyCount)
+		return fmt.Sprintf("超时=%ds  上限=%s  线程=%d  延迟采样=%d  JSON=%t  无交互=%t  元数据=%t",
+			c.Timeout, c.Max, c.Threads, c.LatencyCount, c.OutputJSON, c.NonInteractive, !c.NoMetadata)
 	}
-	return fmt.Sprintf("timeout=%ds  max=%s  threads=%d  latency_count=%d",
-		c.Timeout, c.Max, c.Threads, c.LatencyCount)
+	return fmt.Sprintf("timeout=%ds  max=%s  threads=%d  latency_count=%d  json=%t  non_interactive=%t  metadata=%t",
+		c.Timeout, c.Max, c.Threads, c.LatencyCount, c.OutputJSON, c.NonInteractive, !c.NoMetadata)
 }
 
 var sizeRe = regexp.MustCompile(`(?i)^\s*([\d.]+)\s*([a-z]*)\s*$`)
